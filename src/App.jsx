@@ -121,36 +121,37 @@ async function getCurrentUser() {
   } catch (e) { return null; }
 }
 
-// 관리자용: 새 유저 만들기 (Supabase Admin API — 관리자 세션 필요)
+// 관리자용: 새 유저 만들기 (Edge Function 호출)
 async function adminCreateUser(email, password, displayName) {
   try {
     const headers = await authHeaders();
-    const r = await fetch(`${SUPABASE_URL}/auth/v1/admin/users`, {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/admin-users`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
+        action: 'create',
         email,
         password,
-        email_confirm: true,
-        user_metadata: { display_name: displayName || email.split('@')[0], role: 'therapist' },
+        display_name: displayName || email.split('@')[0],
       }),
     });
     const data = await r.json();
-    if (!r.ok) return { error: data.msg || data.error_description || '계정 생성 실패' };
-    return { user: data };
+    if (!r.ok) return { error: data.error || '계정 생성 실패' };
+    return { user: data.user };
   } catch (e) { return { error: '네트워크 오류: ' + e.message }; }
 }
 
 async function adminDeleteUser(userId) {
   try {
     const headers = await authHeaders();
-    const r = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
-      method: 'DELETE',
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/admin-users`, {
+      method: 'POST',
       headers,
+      body: JSON.stringify({ action: 'delete', user_id: userId }),
     });
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
-      return { error: data.msg || '삭제 실패' };
+      return { error: data.error || '삭제 실패' };
     }
     return { ok: true };
   } catch (e) { return { error: '네트워크 오류: ' + e.message }; }
@@ -159,13 +160,13 @@ async function adminDeleteUser(userId) {
 async function adminUpdateUserPassword(userId, newPassword) {
   try {
     const headers = await authHeaders();
-    const r = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
-      method: 'PUT',
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/admin-users`, {
+      method: 'POST',
       headers,
-      body: JSON.stringify({ password: newPassword }),
+      body: JSON.stringify({ action: 'update_password', user_id: userId, password: newPassword }),
     });
     const data = await r.json();
-    if (!r.ok) return { error: data.msg || '비번 변경 실패' };
+    if (!r.ok) return { error: data.error || '비번 변경 실패' };
     return { ok: true };
   } catch (e) { return { error: '네트워크 오류: ' + e.message }; }
 }
