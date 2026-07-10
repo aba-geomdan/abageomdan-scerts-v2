@@ -4232,9 +4232,8 @@ function loadState() {
       if (child) return { children: [child], activeChildId: child.id };
     }
   } catch (e) {}
-  // 첫 방문(저장 이력 없음): 기본 아동 1명
-  const c = blankChild('');
-  return { children: [c], activeChildId: c.id };
+  // 첫 방문(저장 이력 없음): 아동 목록 비어있게 시작 (사용자가 "새 아동 추가"로 명시적으로 만들도록)
+  return { children: [], activeChildId: null };
 }
 
 // 활성 아동/활성 세션을 기존 `ws` 인터페이스로 어댑팅
@@ -4631,9 +4630,9 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
   const loadAllTeacherData = useCallback(async () => {
     setAdminLoading(true);
     try {
-      // 1. 모든 유저 목록 조회 (admin_list_users)
+      // 1. 모든 유저 목록 조회 (admin_list_users) — 관리자도 포함
       const users = await adminListUsers();
-      const teachers = (users || []).filter((u) => u.role !== 'admin');
+      const teachers = users || [];
       const collected = [];
       // 2. 각 선생님의 데이터 조회 (admin_get_user_data)
       for (const t of teachers) {
