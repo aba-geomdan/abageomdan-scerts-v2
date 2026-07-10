@@ -4597,9 +4597,16 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
           const remoteEditor = remote._lastEditor;
           const myId = getDeviceId();
           const mySaved = lastSavedAtRef.current;
-          // 다른 기기가, 내 마지막 저장보다 더 최근에 저장한 경우만 경고
+          // "진짜 동시 편집"으로 판단하는 조건:
+          //  1. 다른 기기가 저장한 기록이 있고
+          //  2. 그 저장이 최근 2분 이내이며
+          //  3. 내가 이 세션에서 적어도 한 번 저장한 적이 있고
+          //  4. 다른 기기의 저장이 내 마지막 저장보다 최근일 때만
+          const TWO_MINUTES = 2 * 60 * 1000;
+          const now = Date.now();
           if (remoteEditor && remoteEditor.deviceId !== myId
-              && (!mySaved || remoteEditor.at > mySaved + 1000)) {
+              && (now - remoteEditor.at) < TWO_MINUTES
+              && mySaved && remoteEditor.at > mySaved + 1000) {
             setConcurrentEditor({ at: new Date(remoteEditor.at).toLocaleString('ko-KR') });
           }
         }
