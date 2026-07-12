@@ -13,7 +13,7 @@ const AUTH_SESSION_KEY = 'sb-auth-session';
 
 function getStoredSession() {
   try {
-    const raw = localStorage.getItem(AUTH_SESSION_KEY);
+    const raw = sessionStorage.getItem(AUTH_SESSION_KEY);
     if (!raw) return null;
     const s = JSON.parse(raw);
     // 만료 확인 (5분 여유)
@@ -26,8 +26,10 @@ function getStoredSession() {
 
 function saveSession(session) {
   try {
-    if (session) localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
-    else localStorage.removeItem(AUTH_SESSION_KEY);
+    if (session) sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(session));
+    else sessionStorage.removeItem(AUTH_SESSION_KEY);
+    // 과거 localStorage에 남아있던 자동로그인 흔적 제거 (보안)
+    localStorage.removeItem(AUTH_SESSION_KEY);
   } catch (e) {}
 }
 
@@ -52,7 +54,7 @@ async function getValidAccessToken() {
   let session = getStoredSession();
   if (session?.access_token) return session.access_token;
   // 만료됐거나 없음: refresh 시도
-  const raw = localStorage.getItem(AUTH_SESSION_KEY);
+  const raw = sessionStorage.getItem(AUTH_SESSION_KEY);
   if (raw) {
     try {
       const old = JSON.parse(raw);
@@ -5322,6 +5324,9 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
             </div>
           </div>
           <div className="login-fields">
+            {/* 브라우저 자동완성 차단용 미끼 필드 (화면에 보이지 않음) */}
+            <input type="text" name="username" tabIndex={-1} aria-hidden="true" autoComplete="username" style={{ position: 'absolute', opacity: 0, height: 0, width: 0, pointerEvents: 'none', zIndex: -1 }} />
+            <input type="password" name="password" tabIndex={-1} aria-hidden="true" autoComplete="current-password" style={{ position: 'absolute', opacity: 0, height: 0, width: 0, pointerEvents: 'none', zIndex: -1 }} />
             <label className="login-label">이메일</label>
             <input className="login-input" type="email" value={loginEmail}
               onChange={(e) => setLoginEmail(e.target.value)}
