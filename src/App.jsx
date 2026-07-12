@@ -2913,8 +2913,9 @@ function decodeScertsFillToken(token) {
 }
 
 // 외부(부모) 제출 저장 — 제출 1건 = scerts::submit::{childId}::{제출id}
-async function saveScertsSubmission(childId, submission) {
-  const sid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+//   fixedSid를 넘기면 그 id로 덮어쓰기(같은 폰 재제출), 없으면 새로 생성
+async function saveScertsSubmission(childId, submission, fixedSid) {
+  const sid = fixedSid || `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const key = `submit::${childId}::${sid}`;
   return await scertsShared.set(key, { ...submission, sid, submittedAt: new Date().toISOString() });
 }
@@ -8825,7 +8826,17 @@ function ExternalFillPage({ token }) {
         writer: writer.trim() || '',
         answers: buildSubmission(),
       };
-      const r = await saveScertsSubmission(info.cid, submission);
+      // 이 폰의 고정 제출 id (아동별) — 같은 폰에서 다시 내면 이전 제출을 덮어씀
+      let deviceSid = '';
+      try {
+        const sidKey = `scerts-fill-sid::${info.cid}`;
+        deviceSid = localStorage.getItem(sidKey) || '';
+        if (!deviceSid) {
+          deviceSid = `dev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          localStorage.setItem(sidKey, deviceSid);
+        }
+      } catch (e) { deviceSid = ''; }  // localStorage 막힌 환경이면 새 제출로 처리
+      const r = await saveScertsSubmission(info.cid, submission, deviceSid);
       if (!r) { setState('error'); setErrMsg('제출에 실패했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.'); return; }
       // 제출 성공 → 이 폰에 "제출 완료" 기록
       // (임시저장은 남겨둠 → "다시 작성하기" 시 이전 답변이 복원되도록)
