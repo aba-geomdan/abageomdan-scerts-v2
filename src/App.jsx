@@ -2838,6 +2838,99 @@ function decodeParentAnswers(code) {
 
 
 // =====================================================================
+// 부모용 "링크" 방식 (로그인 없이 부모가 링크로 작성 → 자동 수집)
+//   BIP Maker와 동일한 shared_store 테이블 사용 (anon 접근).
+//   scerts_data(RLS 보호)와 분리 — 부모는 로그인 없이 접근하므로.
+//   키 규칙: scerts::submit::{childId}::{제출id}
+// =====================================================================
+const SHARED_SKEY = (k) => `scerts::${k}`;
+
+// shared_store 읽기/쓰기 (anon key 직접 사용 — 로그인 불필요)
+const scertsShared = {
+  async set(key, value) {
+    try {
+      const payload = typeof value === 'string' ? value : JSON.stringify(value);
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/shared_store`, {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify({ key: SHARED_SKEY(key), value: payload, updated_at: new Date().toISOString() }),
+      });
+      if (!r.ok) return null;
+      return { value };
+    } catch (e) { return null; }
+  },
+  async listByPrefix(prefix) {
+    try {
+      const like = encodeURIComponent(SHARED_SKEY(prefix) + '%');
+      const url = `${SUPABASE_URL}/rest/v1/shared_store?key=like.${like}&select=key,value`;
+      const r = await fetch(url, {
+        headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
+      });
+      if (!r.ok) return [];
+      const rows = await r.json();
+      return (rows || []).map((row) => {
+        let v = row.value;
+        for (let i = 0; i < 2 && typeof v === 'string'; i++) {
+          const s = v.trim();
+          if (s && (s[0] === '{' || s[0] === '[')) { try { v = JSON.parse(s); } catch (e) { break; } } else break;
+        }
+        return v;
+      }).filter(Boolean);
+    } catch (e) { return []; }
+  },
+  async del(key) {
+    try {
+      const url = `${SUPABASE_URL}/rest/v1/shared_store?key=eq.${encodeURIComponent(SHARED_SKEY(key))}`;
+      await fetch(url, {
+        method: 'DELETE',
+        headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
+      });
+    } catch (e) { /* ignore */ }
+  },
+};
+
+// 토큰 인코딩/디코딩 — 케이스 식별 정보를 링크에 담아 서버 조회 없이 작동
+//   { cid: childId, cn: 아동이름, sc: 단계(social/language/conversation) }
+function encodeScertsFillToken(obj) {
+  try {
+    const json = JSON.stringify(obj);
+    const b64 = btoa(unescape(encodeURIComponent(json)));
+    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  } catch (e) { return ''; }
+}
+function decodeScertsFillToken(token) {
+  try {
+    let b64 = token.replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4) b64 += '=';
+    const json = decodeURIComponent(escape(atob(b64)));
+    return JSON.parse(json);
+  } catch (e) { return null; }
+}
+
+// 외부(부모) 제출 저장 — 제출 1건 = scerts::submit::{childId}::{제출id}
+async function saveScertsSubmission(childId, submission) {
+  const sid = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const key = `submit::${childId}::${sid}`;
+  return await scertsShared.set(key, { ...submission, sid, submittedAt: new Date().toISOString() });
+}
+// 특정 아동의 부모 제출 목록 조회
+async function listScertsSubmissions(childId) {
+  const rows = await scertsShared.listByPrefix(`submit::${childId}::`);
+  rows.sort((a, b) => String(b.submittedAt || '').localeCompare(String(a.submittedAt || '')));
+  return rows;
+}
+// 제출 삭제
+async function deleteScertsSubmission(childId, sid) {
+  await scertsShared.del(`submit::${childId}::${sid}`);
+}
+
+
+// =====================================================================
 // 관찰 계획을 위한 SCERTS 진단 지도
 // =====================================================================
 const OBSERVATION_MAP = {
@@ -4445,6 +4538,15 @@ function getDeviceId() {
 // 메인 App
 // =====================================================================
 export default function App() {
+  // ── 해시 라우터: #/fill/{token} 이면 외부(부모) 작성 페이지 ──
+  // (부모는 로그인하지 않으므로 세션/로그인 체크보다 먼저 처리)
+  const [hash, setHash] = useState(typeof window !== 'undefined' ? window.location.hash : '');
+  useEffect(() => {
+    const onHash = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
   // ── 로그인 상태 ──
   // authUser: { id, email, name(display_name), role }
   const [authUser, setAuthUser] = useState(null);
@@ -4560,6 +4662,14 @@ export default function App() {
     if (result.error) return { ok: false, msg: result.error };
     return { ok: true };
   };
+
+  // 부모용 링크(#/fill/{token})면 로그인 없이 외부 작성 페이지 렌더
+  const fillMatch = (hash || '').match(/^#\/fill\/(.+)$/);
+  if (fillMatch) {
+    const parts = fillMatch[1].split('/');
+    const token = parts[parts.length - 1];
+    return <ExternalFillPage token={token} />;
+  }
 
   return <AppInner
     key={authUser?.id || '__none__'}
@@ -8566,11 +8676,317 @@ function ReportHeader({ title, ws, extras, dateValue, dateOnChange }) {
 }
 
 // =====================================================================
+// 외부(부모) 작성 페이지 — 로그인 없이 링크(#/fill/{token})로 접속
+//   기존 buildParentQuestionnaireHTML 의 collect() 와 동일한 형식으로
+//   답변을 만들어 shared_store 에 제출한다. (자동 채움 호환)
+// =====================================================================
+function ExternalFillPage({ token }) {
+  const info = decodeScertsFillToken(token);
+  const stage = info?.sc;
+  const interview = stage ? INTERVIEWS[stage] : null;
+
+  const [answers, setAnswers] = useState({});
+  const [writer, setWriter] = useState('');
+  const [state, setState] = useState('idle'); // idle | saving | done | error
+  const [errMsg, setErrMsg] = useState('');
+
+  if (!info || !interview) {
+    return (
+      <div style={extStyles.wrap}>
+        <div style={extStyles.head}>
+          <div style={{ fontSize: 20, fontWeight: 700 }}>SCERTS 질문지</div>
+        </div>
+        <div style={{ ...extStyles.card, textAlign: 'center' }}>
+          <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>링크가 올바르지 않아요</div>
+          <div style={{ fontSize: 13, color: '#7a6f55', lineHeight: 1.6 }}>
+            링크가 손상되었거나 만료되었을 수 있어요. 보내주신 선생님께 새 링크를 요청해 주세요.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const stageLabel = stage === 'social' ? '사회적 파트너 단계'
+    : stage === 'language' ? '언어 파트너 단계' : '대화 파트너 단계';
+
+  // ── 답변 갱신 헬퍼 (기존 collect() 형식과 동일하게) ──
+  const setText = (id, val) => setAnswers((a) => ({ ...a, [id]: val }));
+  const toggleCheck = (id, opt, on) => setAnswers((a) => {
+    const cur = a[id] && typeof a[id] === 'object' ? { checked: { ...(a[id].checked || {}) }, texts: { ...(a[id].texts || {}) } } : { checked: {}, texts: {} };
+    if (on) cur.checked[opt] = true; else delete cur.checked[opt];
+    return { ...a, [id]: cur };
+  });
+  const setExtraText = (id, wtId, val) => setAnswers((a) => {
+    const cur = a[id] && typeof a[id] === 'object' ? { checked: { ...(a[id].checked || {}) }, texts: { ...(a[id].texts || {}) } } : { checked: {}, texts: {} };
+    if (val) cur.texts[wtId] = val; else delete cur.texts[wtId];
+    return { ...a, [id]: cur };
+  });
+  const setFreq = (id, row, col) => setAnswers((a) => {
+    const cur = a[id] && typeof a[id] === 'object' ? { ...a[id] } : {};
+    cur[row] = col;
+    return { ...a, [id]: cur };
+  });
+
+  // ── 제출 시 정리: 빈 값 제거 (기존 collect() 동작 재현) ──
+  const buildSubmission = () => {
+    const out = {};
+    if (writer.trim()) out.__writer = writer.trim();
+    Object.keys(answers).forEach((id) => {
+      const v = answers[id];
+      if (v == null) return;
+      if (typeof v === 'string') {
+        if (v.trim()) out[id] = v;
+      } else if (typeof v === 'object') {
+        // checklist: {checked, texts}
+        if ('checked' in v || 'texts' in v) {
+          const checked = v.checked || {};
+          const texts = v.texts || {};
+          const hasChecked = Object.keys(checked).some((k) => checked[k]);
+          const hasText = Object.keys(texts).some((k) => texts[k] && String(texts[k]).trim());
+          if (hasChecked || hasText) {
+            const obj = {};
+            if (hasChecked) { obj.checked = {}; Object.keys(checked).forEach((k) => { if (checked[k]) obj.checked[k] = true; }); }
+            if (hasText) { obj.texts = {}; Object.keys(texts).forEach((k) => { if (texts[k] && String(texts[k]).trim()) obj.texts[k] = texts[k]; }); }
+            out[id] = obj;
+          }
+        } else {
+          // frequency: {rowIdx: colIdx}
+          const rows = Object.keys(v).filter((k) => v[k] != null && v[k] !== '');
+          if (rows.length) { out[id] = {}; rows.forEach((k) => { out[id][k] = v[k]; }); }
+        }
+      }
+    });
+    return out;
+  };
+
+  const submit = async () => {
+    setState('saving'); setErrMsg('');
+    try {
+      const submission = {
+        stage,
+        childName: info.cn || '',
+        writer: writer.trim() || '',
+        answers: buildSubmission(),
+      };
+      const r = await saveScertsSubmission(info.cid, submission);
+      if (!r) { setState('error'); setErrMsg('제출에 실패했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.'); return; }
+      setState('done');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch (e) {
+      setState('error'); setErrMsg('제출에 실패했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.');
+    }
+  };
+
+  if (state === 'done') {
+    return (
+      <div style={extStyles.wrap}>
+        <div style={extStyles.head}>
+          <div style={{ fontSize: 20, fontWeight: 700 }}>SCERTS 질문지</div>
+          <div style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>{stageLabel}{info.cn ? ' · ' + info.cn : ''}</div>
+        </div>
+        <div style={{ ...extStyles.card, textAlign: 'center', background: '#eef6ef', border: '1px solid #bcdcc6' }}>
+          <div style={{ fontSize: 40, marginBottom: 8 }}>✅</div>
+          <div style={{ fontWeight: 700, fontSize: 17, color: '#2d7a4f', marginBottom: 8 }}>제출이 완료되었어요!</div>
+          <div style={{ fontSize: 13.5, color: '#3a5a44', lineHeight: 1.6 }}>
+            작성해 주셔서 감사합니다. 선생님께 자동으로 전달되었어요.<br />이 창은 닫으셔도 됩니다.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={extStyles.wrap}>
+      <div style={extStyles.head}>
+        <div style={{ fontSize: 20, fontWeight: 700 }}>SCERTS 질문지</div>
+        <div style={{ fontSize: 13, opacity: 0.85, marginTop: 4 }}>{stageLabel}{info.cn ? ' · ' + info.cn : ''}</div>
+      </div>
+
+      <div style={extStyles.intro}>{interview.intro}</div>
+
+      <div style={extStyles.card}>
+        <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 6 }}>작성자 (성함) / 아동과의 관계</label>
+        <input
+          type="text" value={writer} onChange={(e) => setWriter(e.target.value)}
+          placeholder="예: 김영희 / 어머니" style={extStyles.input}
+        />
+      </div>
+
+      {interview.sections.map((sec) => (
+        <div key={sec.key}>
+          <div style={extStyles.secTitle}>{sec.title}</div>
+          {sec.questions.map((q, qi) => (
+            <ExtQuestion
+              key={q.id} q={q} idx={qi + 1} value={answers[q.id]}
+              onText={setText} onToggle={toggleCheck} onExtra={setExtraText} onFreq={setFreq}
+            />
+          ))}
+        </div>
+      ))}
+
+      {state === 'error' && (
+        <div style={{ ...extStyles.card, background: '#fdecec', border: '1px solid #f2b8b8', color: '#b23', fontSize: 13 }}>{errMsg}</div>
+      )}
+
+      <div style={{ padding: '20px 0 40px', textAlign: 'center' }}>
+        <button onClick={submit} disabled={state === 'saving'} style={{ ...extStyles.btn, opacity: state === 'saving' ? 0.6 : 1 }}>
+          {state === 'saving' ? '제출 중...' : '✅ 작성 완료 — 제출하기'}
+        </button>
+        <div style={{ fontSize: 12, color: '#8a7f65', marginTop: 10 }}>제출하면 선생님께 자동으로 전달됩니다.</div>
+      </div>
+    </div>
+  );
+}
+
+// 외부 작성 페이지의 개별 질문 렌더러
+function ExtQuestion({ q, idx, value, onText, onToggle, onExtra, onFreq }) {
+  const freqCols = ['거의/전혀', '가끔', '자주'];
+  return (
+    <div style={extStyles.q}>
+      <div style={extStyles.qText}><span style={extStyles.qIdx}>{idx}.</span> {q.q}</div>
+      {q.type === 'checklist' ? (
+        <div>
+          {(q.options || []).map((opt) => {
+            const on = !!(value && value.checked && value.checked[opt]);
+            return (
+              <label key={opt} style={extStyles.opt}>
+                <input type="checkbox" checked={on} onChange={(e) => onToggle(q.id, opt, e.target.checked)} style={{ marginTop: 4 }} />
+                <span>{opt}</span>
+              </label>
+            );
+          })}
+          {(q.withText || []).map((wt) => {
+            const on = !!(value && value.checked && value.checked[wt.id]);
+            const txt = (value && value.texts && value.texts[wt.id]) || '';
+            return (
+              <div key={wt.id}>
+                <label style={extStyles.opt}>
+                  <input type="checkbox" checked={on} onChange={(e) => onToggle(q.id, wt.id, e.target.checked)} style={{ marginTop: 4 }} />
+                  <span>{wt.label}</span>
+                </label>
+                <input type="text" value={txt} placeholder="구체적인 예" onChange={(e) => onExtra(q.id, wt.id, e.target.value)} style={extStyles.extra} />
+              </div>
+            );
+          })}
+        </div>
+      ) : q.type === 'frequency' ? (
+        <table style={extStyles.freq}>
+          <thead>
+            <tr>
+              <th style={extStyles.freqCell}></th>
+              {freqCols.map((c) => <th key={c} style={extStyles.freqCell}>{c}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {(q.partners || []).map((p, ri) => (
+              <tr key={ri}>
+                <td style={{ ...extStyles.freqCell, textAlign: 'left' }}>{p}</td>
+                {freqCols.map((c, ci) => (
+                  <td key={ci} style={extStyles.freqCell}>
+                    <input type="radio" name={`${q.id}_${ri}`} checked={!!(value && value[ri] === ci)} onChange={() => onFreq(q.id, ri, ci)} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        // text 및 기타 모든 타입(emotionsRows/recoveryPair/scale02List 등) → 자유 서술
+        // (기존 HTML 방식과 동일: 특수 타입도 textarea 하나로 수집)
+        <textarea
+          value={typeof value === 'string' ? value : ''}
+          placeholder="여기에 답변을 입력하세요"
+          onChange={(e) => onText(q.id, e.target.value)}
+          style={extStyles.textarea}
+        />
+      )}
+    </div>
+  );
+}
+
+const extStyles = {
+  wrap: { maxWidth: 760, margin: '0 auto', padding: '20px 16px 40px', fontFamily: "'IBM Plex Sans KR', sans-serif", color: '#2a2419', lineHeight: 1.6, minHeight: '100vh', background: '#f4efe4' },
+  head: { background: '#2d4a3e', color: '#f4efe4', padding: '22px 20px', borderRadius: 14, marginBottom: 18 },
+  intro: { background: '#fff7e6', border: '1px solid #eecf9e', borderRadius: 10, padding: '14px 16px', fontSize: 13.5, color: '#5a4a20', marginBottom: 20 },
+  card: { background: '#fff', border: '1px solid #e4dcc8', borderRadius: 10, padding: '14px 16px', marginBottom: 18 },
+  secTitle: { fontSize: 17, fontWeight: 700, color: '#2d4a3e', margin: '26px 0 12px', paddingBottom: 6, borderBottom: '2px solid #c19a3a' },
+  q: { background: '#fff', border: '1px solid #e4dcc8', borderRadius: 10, padding: '14px 16px', marginBottom: 12 },
+  qText: { fontSize: 14.5, fontWeight: 500, marginBottom: 10 },
+  qIdx: { color: '#c19a3a', fontWeight: 700, marginRight: 4 },
+  textarea: { width: '100%', minHeight: 64, padding: '9px 11px', border: '1px solid #d9d1bd', borderRadius: 8, fontFamily: 'inherit', fontSize: 14, resize: 'vertical', boxSizing: 'border-box' },
+  opt: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '5px 0', fontSize: 14 },
+  extra: { width: '100%', marginTop: 4, padding: '7px 10px', border: '1px solid #e0d8c4', borderRadius: 7, fontSize: 13, fontFamily: 'inherit', boxSizing: 'border-box' },
+  freq: { width: '100%', borderCollapse: 'collapse', marginTop: 6, fontSize: 13 },
+  freqCell: { border: '1px solid #e0d8c4', padding: 7, textAlign: 'center' },
+  input: { width: '100%', padding: '9px 11px', border: '1px solid #d9d1bd', borderRadius: 8, fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box' },
+  btn: { background: '#2d4a3e', color: '#fff', border: 'none', borderRadius: 10, padding: '14px 30px', fontSize: 15, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer' },
+};
+
+// =====================================================================
 // INTERVIEW TAB — 보호자/교사 질문지 (단계별)
 // =====================================================================
 function InterviewTab({ ws, setWs, showToast }) {
   const interview = INTERVIEWS[ws.meta.stage];
   const [activeSection, setActiveSection] = useState(interview.sections[0].key);
+
+  // ── 부모용 "링크" 방식 ──
+  const [fillLink, setFillLink] = useState('');   // 생성된 링크
+  const [subs, setSubs] = useState([]);           // 받은 부모 제출 목록
+  const [subsLoading, setSubsLoading] = useState(false);
+
+  // 링크 생성: 케이스 식별 정보를 토큰에 담아 #/fill/{token} URL 만들기
+  const makeParentLink = () => {
+    const childId = ws._childId;
+    if (!childId) { showToast && showToast('먼저 아동을 저장한 뒤 링크를 만들 수 있습니다'); return; }
+    const token = encodeScertsFillToken({ cid: childId, cn: ws.meta.childName || '', sc: ws.meta.stage });
+    if (!token) { showToast && showToast('링크 생성에 실패했습니다'); return; }
+    const base = (typeof window !== 'undefined')
+      ? window.location.origin + window.location.pathname
+      : '';
+    const link = `${base}#/fill/${token}`;
+    setFillLink(link);
+    try { navigator.clipboard.writeText(link); showToast && showToast('링크를 복사했습니다. 카톡으로 부모님께 보내세요'); }
+    catch (e) { showToast && showToast('링크가 생성되었습니다'); }
+  };
+
+  // 받은 제출 조회
+  const loadSubmissions = async () => {
+    const childId = ws._childId;
+    if (!childId) return;
+    setSubsLoading(true);
+    const rows = await listScertsSubmissions(childId);
+    setSubs(rows);
+    setSubsLoading(false);
+  };
+  useEffect(() => { loadSubmissions(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [ws._childId]);
+
+  // 받은 제출을 질문지에 자동 채움 (기존 붙여넣기 로직과 동일 방식)
+  const applySubmission = async (sub) => {
+    const incoming = sub.answers || {};
+    const writer = sub.writer || incoming.__writer || '';
+    setWs((s) => {
+      const merged = { ...s.interview.answers };
+      Object.keys(incoming).forEach((k) => { if (k !== '__writer') merged[k] = incoming[k]; });
+      const newMeta = { ...s.interview.meta };
+      if (writer && !newMeta.reporter) {
+        const parts = writer.split('/').map((x) => x.trim());
+        newMeta.reporter = parts[0] || writer;
+        if (parts[1] && !newMeta.relation) newMeta.relation = parts[1];
+      }
+      return { ...s, interview: { ...s.interview, answers: merged, meta: newMeta } };
+    });
+    const cnt = Object.keys(incoming).filter((k) => k !== '__writer').length;
+    showToast && showToast(`부모 답안 ${cnt}개 문항을 불러왔습니다`);
+  };
+
+  // 받은 제출 삭제
+  const removeSubmission = async (sub) => {
+    const ok = await appConfirm('이 제출을 삭제할까요? (되돌릴 수 없습니다)');
+    if (!ok) return;
+    await deleteScertsSubmission(ws._childId, sub.sid);
+    setSubs((prev) => prev.filter((x) => x.sid !== sub.sid));
+    showToast && showToast('제출을 삭제했습니다');
+  };
 
   // 부모용 질문지 HTML 다운로드 (카톡 전송용)
   const exportParentForm = () => {
@@ -8666,10 +9082,64 @@ function InterviewTab({ ws, setWs, showToast }) {
         okMsg="질문지 작성됨 — 진단(3번)으로 넘어가세요."
         writer="parent"
       />
-      <div className="kakao-box no-print">
-        <div className="kakao-box-title">💬 부모님께 보내서 받기</div>
+      <div className="kakao-box no-print" style={{ borderColor: '#2d4a3e' }}>
+        <div className="kakao-box-title">🔗 부모님께 링크로 보내기 (추천)</div>
         <div className="kakao-box-desc">
-          질문지를 부모님께 카톡으로 보내고, 작성된 답안을 받아 자동으로 채울 수 있습니다.
+          링크를 카톡으로 보내면, 부모님이 링크만 눌러 바로 작성·제출할 수 있어요. 복사·붙여넣기가 필요 없습니다.
+        </div>
+        <div className="kakao-box-steps">
+          <div className="kakao-step">
+            <span className="kakao-step-num">1</span>
+            <div>
+              <button className="btn-primary btn-small" onClick={makeParentLink}>🔗 작성 링크 만들기</button>
+              <div className="kakao-step-hint">링크가 자동 복사됩니다. 카톡으로 부모님께 붙여넣어 보내세요.</div>
+              {fillLink && (
+                <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input readOnly value={fillLink} onClick={(e) => e.target.select()}
+                    style={{ flex: 1, minWidth: 180, fontSize: 12, padding: '7px 9px', border: '1px solid #d9d1bd', borderRadius: 7, background: '#fafafa', color: '#555' }} />
+                  <button className="btn-ghost btn-small" onClick={() => { try { navigator.clipboard.writeText(fillLink); showToast && showToast('링크를 복사했습니다'); } catch (e) {} }}>복사</button>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="kakao-step">
+            <span className="kakao-step-num">2</span>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <b style={{ fontSize: 14 }}>받은 제출 {subs.length > 0 ? `(${subs.length}건)` : ''}</b>
+                <button className="btn-ghost btn-small" onClick={loadSubmissions} disabled={subsLoading}>
+                  {subsLoading ? '불러오는 중…' : '🔄 새로고침'}
+                </button>
+              </div>
+              <div className="kakao-step-hint">부모님이 제출하면 여기에 자동으로 뜹니다. "불러오기"를 누르면 질문지가 채워집니다.</div>
+              {subs.length === 0 && !subsLoading && (
+                <div style={{ fontSize: 12.5, color: '#8a7f65', marginTop: 8 }}>아직 받은 제출이 없습니다.</div>
+              )}
+              {subs.map((sub) => {
+                const cnt = Object.keys(sub.answers || {}).filter((k) => k !== '__writer').length;
+                return (
+                  <div key={sub.sid} style={{ marginTop: 8, padding: '10px 12px', background: '#fff', border: '1px solid #e4dcc8', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ flex: 1, minWidth: 140 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+                        {sub.writer || '작성자 미기재'}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: '#8a7f65', marginTop: 2 }}>
+                        {cnt}개 문항 · 제출 {sub.submittedAt ? String(sub.submittedAt).slice(0, 10) : ''}
+                      </div>
+                    </div>
+                    <button className="btn-primary btn-small" onClick={() => applySubmission(sub)}>불러오기</button>
+                    <button className="btn-ghost btn-small" onClick={() => removeSubmission(sub)}>삭제</button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="kakao-box no-print">
+        <div className="kakao-box-title">💬 부모님께 보내서 받기 (다른 방법 — 파일)</div>
+        <div className="kakao-box-desc">
+          링크가 어려운 경우, 파일을 카톡으로 보내고 부모님이 보낸 코드를 붙여넣어 채울 수도 있습니다.
         </div>
         <div className="kakao-box-steps">
           <div className="kakao-step">
