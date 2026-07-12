@@ -8685,10 +8685,46 @@ function ExternalFillPage({ token }) {
   const stage = info?.sc;
   const interview = stage ? INTERVIEWS[stage] : null;
 
-  const [answers, setAnswers] = useState({});
-  const [writer, setWriter] = useState('');
-  const [state, setState] = useState('idle'); // idle | saving | done | error
+  // 작성 중 자동 임시저장 키 (케이스별로 구분)
+  const draftKey = info?.cid ? `scerts-fill-draft::${info.cid}` : null;
+
+  // 초기값: 임시저장된 내용이 있으면 복원
+  const [answers, setAnswers] = useState(() => {
+    if (!draftKey) return {};
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) { const d = JSON.parse(raw); return d.answers || {}; }
+    } catch (e) {}
+    return {};
+  });
+  const [writer, setWriter] = useState(() => {
+    if (!draftKey) return '';
+    try {
+      const raw = localStorage.getItem(draftKey);
+      if (raw) { const d = JSON.parse(raw); return d.writer || ''; }
+    } catch (e) {}
+    return '';
+  });
+  const [state, setState] = useState(() => {
+    // 이 폰에서 이미 제출했으면 done 화면으로 시작
+    if (info?.cid) {
+      try { if (localStorage.getItem(`scerts-fill-done::${info.cid}`)) return 'done'; } catch (e) {}
+    }
+    return 'idle';
+  }); // idle | saving | done | error
   const [errMsg, setErrMsg] = useState('');
+  const [restored, setRestored] = useState(() => {
+    // 복원된 내용이 있었는지 (안내 배너용)
+    if (!draftKey) return false;
+    try { const raw = localStorage.getItem(draftKey); if (raw) { const d = JSON.parse(raw); return !!(d && (Object.keys(d.answers || {}).length || d.writer)); } } catch (e) {}
+    return false;
+  });
+
+  // 값이 바뀔 때마다 자동 임시저장 (제출 완료 전까지)
+  useEffect(() => {
+    if (!draftKey || state === 'done') return;
+    try { localStorage.setItem(draftKey, JSON.stringify({ answers, writer, savedAt: Date.now() })); } catch (e) {}
+  }, [answers, writer, draftKey, state]);
 
   if (!info || !interview) {
     return (
@@ -8726,34 +8762,55 @@ function ExternalFillPage({ token }) {
     cur[row] = col;
     return { ...a, [id]: cur };
   });
+  // 특수 타입(emotionsRows/recoveryPair/scale02List) 공용 setter: 객체 병합
+  const setObjField = (id, field, val) => setAnswers((a) => {
+    const cur = a[id] && typeof a[id] === 'object' ? { ...a[id] } : {};
+    cur[field] = val;
+    return { ...a, [id]: cur };
+  });
 
-  // ── 제출 시 정리: 빈 값 제거 (기존 collect() 동작 재현) ──
+  // 질문 id → 타입 조회용 맵 (buildSubmission에서 타입 기반 정리)
+  const qTypeById = {};
+  interview.sections.forEach((sec) => sec.questions.forEach((q) => { qTypeById[q.id] = q.type; }));
+
+  // ── 제출 시 정리: 타입 기반으로 빈 값 제거 ──
   const buildSubmission = () => {
     const out = {};
     if (writer.trim()) out.__writer = writer.trim();
     Object.keys(answers).forEach((id) => {
       const v = answers[id];
       if (v == null) return;
-      if (typeof v === 'string') {
-        if (v.trim()) out[id] = v;
-      } else if (typeof v === 'object') {
-        // checklist: {checked, texts}
-        if ('checked' in v || 'texts' in v) {
-          const checked = v.checked || {};
-          const texts = v.texts || {};
-          const hasChecked = Object.keys(checked).some((k) => checked[k]);
-          const hasText = Object.keys(texts).some((k) => texts[k] && String(texts[k]).trim());
-          if (hasChecked || hasText) {
-            const obj = {};
-            if (hasChecked) { obj.checked = {}; Object.keys(checked).forEach((k) => { if (checked[k]) obj.checked[k] = true; }); }
-            if (hasText) { obj.texts = {}; Object.keys(texts).forEach((k) => { if (texts[k] && String(texts[k]).trim()) obj.texts[k] = texts[k]; }); }
-            out[id] = obj;
-          }
-        } else {
-          // frequency: {rowIdx: colIdx}
+      const type = qTypeById[id];
+
+      if (type === 'checklist') {
+        const checked = (v && v.checked) || {};
+        const texts = (v && v.texts) || {};
+        const hasChecked = Object.keys(checked).some((k) => checked[k]);
+        const hasText = Object.keys(texts).some((k) => texts[k] && String(texts[k]).trim());
+        if (hasChecked || hasText) {
+          const obj = {};
+          if (hasChecked) { obj.checked = {}; Object.keys(checked).forEach((k) => { if (checked[k]) obj.checked[k] = true; }); }
+          if (hasText) { obj.texts = {}; Object.keys(texts).forEach((k) => { if (texts[k] && String(texts[k]).trim()) obj.texts[k] = texts[k]; }); }
+          out[id] = obj;
+        }
+      } else if (type === 'frequency') {
+        if (v && typeof v === 'object') {
           const rows = Object.keys(v).filter((k) => v[k] != null && v[k] !== '');
           if (rows.length) { out[id] = {}; rows.forEach((k) => { out[id][k] = v[k]; }); }
         }
+      } else if (type === 'emotionsRows' || type === 'recoveryPair' || type === 'scale02List') {
+        // 값이 있는 필드만 남김 (선생님 렌더 형식과 동일한 객체 구조 유지)
+        if (v && typeof v === 'object') {
+          const obj = {};
+          Object.keys(v).forEach((k) => {
+            const val = v[k];
+            if (val === 0 || (val != null && String(val).trim() !== '')) obj[k] = val;
+          });
+          if (Object.keys(obj).length) out[id] = obj;
+        }
+      } else {
+        // text 및 기타 → 문자열
+        if (typeof v === 'string' && v.trim()) out[id] = v;
       }
     });
     return out;
@@ -8770,6 +8827,9 @@ function ExternalFillPage({ token }) {
       };
       const r = await saveScertsSubmission(info.cid, submission);
       if (!r) { setState('error'); setErrMsg('제출에 실패했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.'); return; }
+      // 제출 성공 → 이 폰에 "제출 완료" 기록
+      // (임시저장은 남겨둠 → "다시 작성하기" 시 이전 답변이 복원되도록)
+      try { if (info.cid) localStorage.setItem(`scerts-fill-done::${info.cid}`, String(Date.now())); } catch (e) {}
       setState('done');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) {
@@ -8791,6 +8851,19 @@ function ExternalFillPage({ token }) {
             작성해 주셔서 감사합니다. 선생님께 자동으로 전달되었어요.<br />이 창은 닫으셔도 됩니다.
           </div>
         </div>
+        <div style={{ textAlign: 'center' }}>
+          <button
+            onClick={() => {
+              try { if (info.cid) localStorage.removeItem(`scerts-fill-done::${info.cid}`); } catch (e) {}
+              setState('idle');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            style={{ background: 'none', border: '1px solid #bcdcc6', color: '#2d7a4f', borderRadius: 9, padding: '10px 20px', fontSize: 13.5, fontFamily: 'inherit', cursor: 'pointer' }}
+          >
+            내용을 추가·수정하려면 다시 작성하기
+          </button>
+          <div style={{ fontSize: 12, color: '#8a7f65', marginTop: 8 }}>다시 제출하면 새 답변으로 한 번 더 전달됩니다.</div>
+        </div>
       </div>
     );
   }
@@ -8803,6 +8876,13 @@ function ExternalFillPage({ token }) {
       </div>
 
       <div style={extStyles.intro}>{interview.intro}</div>
+
+      {restored && (
+        <div style={{ background: '#eef6ef', border: '1px solid #bcdcc6', borderRadius: 10, padding: '11px 14px', marginBottom: 16, fontSize: 13, color: '#2d7a4f', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <span>✅ 이전에 작성하던 내용을 불러왔어요. 이어서 작성하세요.</span>
+          <button onClick={() => setRestored(false)} style={{ background: 'none', border: 'none', color: '#2d7a4f', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}>×</button>
+        </div>
+      )}
 
       <div style={extStyles.card}>
         <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 6 }}>작성자 (성함) / 아동과의 관계</label>
@@ -8818,7 +8898,7 @@ function ExternalFillPage({ token }) {
           {sec.questions.map((q, qi) => (
             <ExtQuestion
               key={q.id} q={q} idx={qi + 1} value={answers[q.id]}
-              onText={setText} onToggle={toggleCheck} onExtra={setExtraText} onFreq={setFreq}
+              onText={setText} onToggle={toggleCheck} onExtra={setExtraText} onFreq={setFreq} onObj={setObjField}
             />
           ))}
         </div>
@@ -8839,8 +8919,9 @@ function ExternalFillPage({ token }) {
 }
 
 // 외부 작성 페이지의 개별 질문 렌더러
-function ExtQuestion({ q, idx, value, onText, onToggle, onExtra, onFreq }) {
+function ExtQuestion({ q, idx, value, onText, onToggle, onExtra, onFreq, onObj }) {
   const freqCols = ['거의/전혀', '가끔', '자주'];
+  const scaleLabels = ['거의/전혀', '가끔', '대부분'];
   return (
     <div style={extStyles.q}>
       <div style={extStyles.qText}><span style={extStyles.qIdx}>{idx}.</span> {q.q}</div>
@@ -8890,9 +8971,67 @@ function ExtQuestion({ q, idx, value, onText, onToggle, onExtra, onFreq }) {
             ))}
           </tbody>
         </table>
+      ) : q.type === 'emotionsRows' ? (
+        // 감정별로 나눠서 작성
+        <div>
+          {(q.emotions || []).map((emo) => (
+            <div key={emo} style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 4 }}>{emo}</div>
+              <textarea
+                value={(value && value[emo]) || ''}
+                placeholder="어떻게 표현하는지 적어주세요"
+                onChange={(e) => onObj(q.id, emo, e.target.value)}
+                style={{ ...extStyles.textarea, minHeight: 44 }}
+              />
+            </div>
+          ))}
+        </div>
+      ) : q.type === 'recoveryPair' ? (
+        // 스스로 회복 / 파트너 도움 두 칸으로 분리
+        <div>
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 4 }}>• {q.self}</div>
+            <textarea
+              value={(value && value.self) || ''}
+              placeholder="여기에 답변을 입력하세요"
+              onChange={(e) => onObj(q.id, 'self', e.target.value)}
+              style={extStyles.textarea}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 4 }}>• {q.partner}</div>
+            <textarea
+              value={(value && value.partner) || ''}
+              placeholder="여기에 답변을 입력하세요"
+              onChange={(e) => onObj(q.id, 'partner', e.target.value)}
+              style={extStyles.textarea}
+            />
+          </div>
+        </div>
+      ) : q.type === 'scale02List' ? (
+        // 항목별 0/1/2 척도 (부모가 이해하기 쉽게 라벨 표시)
+        <table style={extStyles.freq}>
+          <thead>
+            <tr>
+              <th style={extStyles.freqCell}></th>
+              {scaleLabels.map((c, i) => <th key={i} style={extStyles.freqCell}>{c}<br /><span style={{ fontSize: 11, color: '#8a7f65' }}>({i})</span></th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {(q.items || []).map((item, ri) => (
+              <tr key={ri}>
+                <td style={{ ...extStyles.freqCell, textAlign: 'left' }}>{item}</td>
+                {[0, 1, 2].map((n) => (
+                  <td key={n} style={extStyles.freqCell}>
+                    <input type="radio" name={`${q.id}_${ri}`} checked={!!(value && value[item] === n)} onChange={() => onObj(q.id, item, n)} />
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       ) : (
-        // text 및 기타 모든 타입(emotionsRows/recoveryPair/scale02List 등) → 자유 서술
-        // (기존 HTML 방식과 동일: 특수 타입도 textarea 하나로 수집)
+        // text 및 기타 → 자유 서술
         <textarea
           value={typeof value === 'string' ? value : ''}
           placeholder="여기에 답변을 입력하세요"
@@ -8945,6 +9084,8 @@ function InterviewTab({ ws, setWs, showToast }) {
       : '';
     const link = `${base}#/fill/${token}`;
     setFillLink(link);
+    // 링크 발송 기록 (workspace에 저장 → scerts_data에 자동 반영)
+    setWs((s) => ({ ...s, interview: { ...s.interview, linkSentAt: new Date().toISOString() } }));
     try { navigator.clipboard.writeText(link); showToast && showToast('링크를 복사했습니다. 카톡으로 부모님께 보내세요'); }
     catch (e) { showToast && showToast('링크가 생성되었습니다'); }
   };
@@ -8959,6 +9100,19 @@ function InterviewTab({ ws, setWs, showToast }) {
     setSubsLoading(false);
   };
   useEffect(() => { loadSubmissions(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [ws._childId]);
+
+  // 창 포커스가 돌아오거나 탭이 다시 보일 때 자동 새로고침
+  // (부모가 방금 제출한 내용을 선생님이 놓치지 않도록)
+  useEffect(() => {
+    const onFocus = () => { if (document.visibilityState !== 'hidden') loadSubmissions(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [ws._childId]);
 
   // 받은 제출을 질문지에 자동 채움 (기존 붙여넣기 로직과 동일 방식)
   const applySubmission = async (sub) => {
@@ -9093,6 +9247,11 @@ function InterviewTab({ ws, setWs, showToast }) {
             <div>
               <button className="btn-primary btn-small" onClick={makeParentLink}>🔗 작성 링크 만들기</button>
               <div className="kakao-step-hint">링크가 자동 복사됩니다. 카톡으로 부모님께 붙여넣어 보내세요.</div>
+              {ws.interview?.linkSentAt && (
+                <div style={{ fontSize: 12, color: '#2d7a4f', marginTop: 4 }}>
+                  ✓ 링크 발송 기록: {String(ws.interview.linkSentAt).slice(0, 10)}
+                </div>
+              )}
               {fillLink && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                   <input readOnly value={fillLink} onClick={(e) => e.target.select()}
