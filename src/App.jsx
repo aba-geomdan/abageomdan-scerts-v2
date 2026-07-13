@@ -1,5 +1,37 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 
+// ============================================================
+// 도메인 잠금 — 허용된 주소에서만 앱이 작동.
+// 남이 코드를 복사해 다른 사이트에 올려도 화면이 뜨지 않게 함.
+// 허용: aba-geomdan.github.io (배포) + localhost/127.0.0.1 (로컬 개발)
+// ============================================================
+(function domainGuard() {
+  try {
+    if (typeof window === 'undefined') return;
+    const host = window.location.hostname || '';
+    const allowed =
+      host === 'aba-geomdan.github.io' ||
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '' ||
+      host.endsWith('.local');
+    if (!allowed) {
+      document.documentElement.innerHTML =
+        '<body style="margin:0;display:flex;align-items:center;justify-content:center;' +
+        'min-height:100vh;font-family:sans-serif;background:#fdf5f5;color:#a84960;' +
+        'text-align:center;padding:24px;">' +
+        '<div><div style="font-size:18px;font-weight:700;margin-bottom:8px;">' +
+        '접근할 수 없는 페이지입니다</div>' +
+        '<div style="font-size:13px;color:#8a6571;line-height:1.6;">' +
+        '이 애플리케이션은 검단ABA언어행동연구소의 지적재산이며,<br>' +
+        '허가된 주소에서만 이용할 수 있습니다.</div></div></body>';
+      throw new Error('unauthorized host');
+    }
+  } catch (e) {
+    if (e && e.message === 'unauthorized host') throw e;
+  }
+})();
+
 // =====================================================================
 // Supabase 연결 설정
 // =====================================================================
