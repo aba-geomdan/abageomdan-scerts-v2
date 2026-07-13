@@ -32,5 +32,5 @@ export default defineConfig({
       },
     }),
   ],
-  base: '/geomdan-guide/',
+  base: '/abageomdan-scerts-v2/',
 });
