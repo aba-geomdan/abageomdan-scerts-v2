@@ -2879,20 +2879,17 @@ function decodeParentAnswers(code) {
 // =====================================================================
 const SHARED_SKEY = (k) => `scerts::${k}`;
 
-// shared_store 읽기/쓰기 (anon key 직접 사용 — 로그인 불필요)
+// shared_store 읽기/쓰기
+//   2026-11 보안: 보기 · 지우기는 로그인한 원장·선생님만 (로그인 열쇠로 접근)
+//   부모님은 '보내기'만 — submit_external 전용 통로
 const scertsShared = {
   async set(key, value) {
     try {
       const payload = typeof value === 'string' ? value : JSON.stringify(value);
-      const r = await fetch(`${SUPABASE_URL}/rest/v1/shared_store`, {
+      const r = await fetch(`${SUPABASE_URL}/rest/v1/rpc/submit_external`, {
         method: 'POST',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'resolution=merge-duplicates,return=minimal',
-        },
-        body: JSON.stringify({ key: SHARED_SKEY(key), value: payload, updated_at: new Date().toISOString() }),
+        headers: await authHeaders(),
+        body: JSON.stringify({ p_key: SHARED_SKEY(key), p_value: payload }),
       });
       if (!r.ok) return null;
       return { value };
@@ -2902,9 +2899,7 @@ const scertsShared = {
     try {
       const like = encodeURIComponent(SHARED_SKEY(prefix) + '%');
       const url = `${SUPABASE_URL}/rest/v1/shared_store?key=like.${like}&select=key,value`;
-      const r = await fetch(url, {
-        headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
-      });
+      const r = await fetch(url, { headers: await authHeaders() });
       if (!r.ok) return [];
       const rows = await r.json();
       return (rows || []).map((row) => {
@@ -2920,10 +2915,7 @@ const scertsShared = {
   async del(key) {
     try {
       const url = `${SUPABASE_URL}/rest/v1/shared_store?key=eq.${encodeURIComponent(SHARED_SKEY(key))}`;
-      await fetch(url, {
-        method: 'DELETE',
-        headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
-      });
+      await fetch(url, { method: 'DELETE', headers: await authHeaders() });
     } catch (e) { /* ignore */ }
   },
 };
