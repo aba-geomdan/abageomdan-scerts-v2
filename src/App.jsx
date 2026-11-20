@@ -4564,6 +4564,29 @@ function getDeviceId() {
 // =====================================================================
 // 메인 App
 // =====================================================================
+// ★ [통합본 연결] 통합본(원장님 화면)에서 아이를 골라 이 앱을 열었을 때 넘겨받은 이름·생년월일
+//   - 주소에는 아이 번호만(?aba_child=...), 이름·생년월일은 같은 사이트 저장칸(aba-child-handoff)에 잠깐 맡겨 둔 것을 한 번 읽고 지운다.
+//   - 이 앱(APPKEY) 것이고 30분 안의 것만 쓴다.
+const ABA_CHILD_HANDOFF_KEY = 'aba-child-handoff';
+function readAbaChildLink(appKey) {
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    const cid = params.get('aba_child');
+    if (!cid) return null;
+    let link = null;
+    try {
+      const h = JSON.parse(localStorage.getItem(ABA_CHILD_HANDOFF_KEY) || 'null');
+      if (h && h.app === appKey && String(h.cid) === String(cid) && Date.now() - (Number(h.ts) || 0) < 30 * 60 * 1000) {
+        const b = String(h.birth || '');
+        link = { cid: String(cid), name: String(h.name || '').trim(), birth: /^\d{4}-\d{2}-\d{2}$/.test(b) ? b : '' };
+      }
+    } catch (e) {}
+    try { localStorage.removeItem(ABA_CHILD_HANDOFF_KEY); } catch (e) {}
+    try { params.delete('aba_child'); const q = params.toString(); window.history.replaceState(null, '', window.location.pathname + (q ? '?' + q : '') + window.location.hash); } catch (e) {}
+    return link && link.name ? link : null;
+  } catch (e) { return null; }
+}
+
 export default function App() {
   // ── 해시 라우터: #/fill/{token} 이면 외부(부모) 작성 페이지 ──
   // (부모는 로그인하지 않으므로 세션/로그인 체크보다 먼저 처리)
@@ -4768,6 +4791,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
   const [allTeacherData, setAllTeacherData] = useState([]); // [{teacher, children:[{name, key, snapshot}]}]
   const [adminLoading, setAdminLoading] = useState(false);
   const sharedLoadedRef = useRef(false);
+  const [sharedReady, setSharedReady] = useState(false); // ★ [통합본 연결] 내 데이터를 다 불러왔는지
   const viewEditWarnedRef = useRef(false);
 
   // 관리자: 모든 선생님의 데이터를 RPC 함수로 수집
@@ -4815,11 +4839,13 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
   // 로그인한 선생님의 데이터를 공유 저장소에서 불러온다 (게시 환경에서만)
   useEffect(() => {
     let cancelled = false;
+    setSharedReady(false);
     (async () => {
       if (!authUser?.name) return;
       if (!window.storage) {
         // 게시 안 된 환경: 공유 저장소 없음 → localStorage 그대로 사용
         sharedLoadedRef.current = true;
+        setSharedReady(true);
         return;
       }
       try {
@@ -4840,7 +4866,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
           if (Array.isArray(loadedArchive)) setArchive(loadedArchive);
         }
       } catch (e) {}
-      if (!cancelled) sharedLoadedRef.current = true;
+      if (!cancelled) { sharedLoadedRef.current = true; setSharedReady(true); }
     })();
     return () => { cancelled = true; };
     // authUser.name이 바뀔 때(로그인/계정전환)마다 재로드
@@ -5031,6 +5057,40 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
     setTab('home');
     showToast(`${name || '새 아동'}이(가) 추가되었습니다`);
   }, [showToast]);
+
+  // ★ [통합본 연결] 원장님 계정일 때만: 같은 아이가 있으면 그 아이를 열고, 없으면 물어본 뒤 이름·생년월일을 넣어 새로 추가
+  const [abaLink, setAbaLink] = useState(() => readAbaChildLink('scerts'));
+  const abaLinkBusyRef = useRef(false);
+  useEffect(() => {
+    if (!abaLink || abaLinkBusyRef.current) return;
+    if (!authUser) return;
+    if (authUser.role !== 'admin') { setAbaLink(null); return; }
+    if (!sharedReady) return;
+    abaLinkBusyRef.current = true;
+    const link = abaLink;
+    (async () => {
+      try {
+        if (state._viewingTeacher) { showToast('다른 선생님 자료를 보는 중이라 통합본 아이를 열지 않았습니다'); return; }
+        const list = Array.isArray(state.children) ? state.children : [];
+        const found = list.find((c) => c.meta && String(c.meta.abaChildId || '') === link.cid)
+          || list.find((c) => c.meta && String(c.meta.childName || '').trim() === link.name);
+        if (found) { switchChild(found.id); return; }
+        const ok = await appConfirm(`통합본의 "${link.name}" 아동을 SCERTS에 새로 추가할까요?\n\n이름${link.birth ? '·생년월일(' + link.birth + ')' : ''}이 들어갑니다.`);
+        if (!ok) return;
+        setState((s) => {
+          if (s._viewingTeacher) return s;
+          const child = blankChild(link.name);
+          child.meta = { ...child.meta, birthDate: link.birth || '', abaChildId: link.cid };
+          return { ...s, children: [...s.children, child], activeChildId: child.id };
+        });
+        setTab('home');
+        showToast(`${link.name}이(가) 추가되었습니다`);
+      } finally {
+        setAbaLink(null);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [abaLink, authUser, sharedReady]);
 
   const loadSampleChild = useCallback((stage = 'language') => {
     let blocked = false;
