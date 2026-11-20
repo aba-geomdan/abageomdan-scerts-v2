@@ -4567,12 +4567,24 @@ function getDeviceId() {
 // ★ [통합본 연결] 통합본(원장님 화면)에서 아이를 골라 이 앱을 열었을 때 넘겨받은 이름·생년월일
 //   - 주소에는 아이 번호만(?aba_child=...), 이름·생년월일은 같은 사이트 저장칸(aba-child-handoff)에 잠깐 맡겨 둔 것을 한 번 읽고 지운다.
 //   - 이 앱(APPKEY) 것이고 30분 안의 것만 쓴다.
+//   - 로그인 확인 뒤 화면이 처음부터 다시 그려져도 잃지 않게, 처리가 끝날 때까지 이 창 안 저장칸에 맡겨 둔다.
 const ABA_CHILD_HANDOFF_KEY = 'aba-child-handoff';
+const ABA_CHILD_LINK_KEY = 'aba-child-link-scerts';
+function clearAbaChildLink() {
+  try { sessionStorage.removeItem(ABA_CHILD_LINK_KEY); } catch (e) {}
+}
 function readAbaChildLink(appKey) {
   try {
     const params = new URLSearchParams(window.location.search || '');
     const cid = params.get('aba_child');
-    if (!cid) return null;
+    if (!cid) {
+      try {
+        const saved = JSON.parse(sessionStorage.getItem(ABA_CHILD_LINK_KEY) || 'null');
+        if (saved && saved.cid && saved.name && Date.now() - (Number(saved.ts) || 0) < 30 * 60 * 1000) return { cid: saved.cid, name: saved.name, birth: saved.birth || '' };
+      } catch (e) {}
+      clearAbaChildLink();
+      return null;
+    }
     let link = null;
     try {
       const h = JSON.parse(localStorage.getItem(ABA_CHILD_HANDOFF_KEY) || 'null');
@@ -4582,6 +4594,8 @@ function readAbaChildLink(appKey) {
       }
     } catch (e) {}
     try { localStorage.removeItem(ABA_CHILD_HANDOFF_KEY); } catch (e) {}
+    if (link && link.name) { try { sessionStorage.setItem(ABA_CHILD_LINK_KEY, JSON.stringify({ ...link, ts: Date.now() })); } catch (e) {} }
+    else clearAbaChildLink();
     try { params.delete('aba_child'); const q = params.toString(); window.history.replaceState(null, '', window.location.pathname + (q ? '?' + q : '') + window.location.hash); } catch (e) {}
     return link && link.name ? link : null;
   } catch (e) { return null; }
@@ -5064,9 +5078,10 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
   useEffect(() => {
     if (!abaLink || abaLinkBusyRef.current) return;
     if (!authUser) return;
-    if (authUser.role !== 'admin') { setAbaLink(null); return; }
+    if (authUser.role !== 'admin') { clearAbaChildLink(); setAbaLink(null); return; }
     if (!sharedReady) return;
     abaLinkBusyRef.current = true;
+    clearAbaChildLink(); // 이제 처리하므로 맡겨 둔 것은 지움
     const link = abaLink;
     (async () => {
       try {
