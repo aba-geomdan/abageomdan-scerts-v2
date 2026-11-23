@@ -239,16 +239,17 @@ async function dataGet(key) {
   try {
     const headers = await authHeaders();
     const user = await getCurrentUser();
-    if (!user?.id) return null;
+    // ★ 못 불러온 경우(인터넷·로그인 문제)는 '자료 없음'과 구분해서 알려 준다 → 옛 자료로 서버를 덮어쓰지 않게
+    if (!user?.id) return { error: true };
     const url = `${SUPABASE_URL}/rest/v1/scerts_data?user_id=eq.${user.id}&key=eq.${encodeURIComponent(key)}&select=key,value`;
     const r = await fetch(url, { headers });
-    if (!r.ok) return null;
+    if (!r.ok) return { error: true };
     const rows = await r.json();
     if (rows && rows.length > 0) {
       return { key: rows[0].key, value: rows[0].value };
     }
     return null;
-  } catch (e) { return null; }
+  } catch (e) { return { error: true }; }
 }
 
 async function dataSet(key, value) {
@@ -364,8 +365,8 @@ function firstNameOnly(fullName) {
   }
   // 일반 단성: 3글자 이상이면 첫 글자를 성으로 분리 (민다슬→다슬, 김민준→민준)
   if (name.length >= 3) return name.slice(1);
-  // 2글자(예: 김수)는 성+외자 이름 → 첫 글자 성 분리 (수)
-  if (name.length === 2) return name.slice(1);
+  // ★ 2글자는 성 없이 이름만 넣은 경우가 많아 그대로 쓴다 (준호 → 준호는 / 예전엔 '호는'으로 나왔음)
+  if (name.length === 2) return name;
   // 1글자는 성인지 이름인지 알 수 없음 → 그대로 둠 (성만 입력된 경우 분리하면 안 됨)
   return name;
 }
@@ -431,9 +432,54 @@ function localizeText(text, fullName) {
     const isK = lc && lc.charCodeAt(0) >= 0xac00 && lc.charCodeAt(0) <= 0xd7a3;
     return (isK && hasJongseong(f)) ? f + '이' : f;
   });
-  // 격식체 → 평서체
-  t = t.replace(/입니다\./g, '다.').replace(/습니다\./g, '다.');
+  // 격식체 → 평서체 (받침 있으면 '이다': 수준입니다 → 수준이다 / 없으면 '다': 상태입니다 → 상태다)
+  //   '보입니다·줄입니다'처럼 '-이다'가 아닌 동사는 먼저 따로 바꾼다 (보인다·줄인다)
+  //   (앞이 띄어쓰기일 때만: '정보입니다·확보입니다' 같은 명사는 건드리지 않음)
+  //   '한 줄입니다·두 줄입니다'처럼 앞이 수를 나타내는 말이면 명사로 보고 건드리지 않음
+  //   (옛 아이폰(iOS 16.3 이하)에서도 앱이 열리도록 '뒤돌아보기' 정규식은 쓰지 않고, 앞 단어를 직접 확인)
+  const COUNT_WORDS = ['한', '두', '세', '네', '몇', '여러', '열'];
+  t = t.replace(/(^|\s)(보|줄|높|늘|붙|먹|속|숨|녹|죽|끓|낮|좁|넓)입니다\./g, (m, sp, v, off, str) => {
+    const prevWord = str.slice(0, off).trim().split(/\s+/).pop() || '';
+    if (sp && COUNT_WORDS.includes(prevWord)) return m;
+    return sp + v + '인다.';
+  });
+  t = t.replace(/(.)입니다\./g, (m, ch) => ch + (hasJongseong(ch) ? '이다.' : '다.'));
+  //   '필요합니다·중요합니다'처럼 상태를 나타내는 말은 '-하다', 그 밖의 '-합니다'는 '-한다'
+  t = t.replace(/(필요|중요|적절|가능|불가능|유용|충분|바람직|분명|확실|시급|용이|원활|부족|미흡|양호|우수|유사|동일|적합|부적절|효과적|안정적|일관적)합니다\./g, '$1하다.');
+  t = t.replace(/습니다\./g, '다.').replace(/됩니다\./g, '된다.').replace(/합니다\./g, '한다.');
   return t;
+}
+
+// 긴 글을 n자 안에서 자를 때 문장 끝(마침표)에서 자르고, 마침표가 없으면 띄어쓰기에서 잘라 '…'를 붙인다
+function clipText(text, n) {
+  const s = String(text || '').trim();
+  if (s.length <= n) return s;
+  const head = s.slice(0, n);
+  const dot = Math.max(head.lastIndexOf('. '), head.lastIndexOf('.\n'), head.endsWith('.') ? head.length - 1 : -1);
+  if (dot >= n / 3) return head.slice(0, dot + 1);
+  const sp = head.lastIndexOf(' ');
+  return (sp > 0 ? head.slice(0, sp) : head) + '…';
+}
+
+// 따옴표로 묶은 말 뒤 조사 '을/를' (받침 있으면 '을')
+function eulReul(text) {
+  // 끝의 문장부호·괄호·따옴표는 빼고 마지막 글자를 본다 ("…것." → '것' → 을)
+  const t = String(text || '').trim().replace(/[\s.,!?~…·)\]}>"'”’」』》〉]+$/, '');
+  const last = t.slice(-1);
+  // 숫자는 읽는 소리로: 0영 1일 3삼 6육 7칠 8팔 → 받침 있음 / 2이 4사 5오 9구 → 없음
+  if (/[0-9]/.test(last)) return '013678'.includes(last) ? '을' : '를';
+  return hasJongseong(t) ? '을' : '를';
+}
+
+// 정서 조절 패턴 판정 — 진단 분석·IEP·중간보고서가 모두 같은 기준을 쓰도록 한 곳에 모음
+//   ★ 책 기준(1권 265쪽): 칸의 절반 이상 = 상대적 강점, 절반 미만 = 상대적 요구. 경계는 50% 하나
+function classifyMrSr(mrP, srP) {
+  const mrHigh = mrP >= 0.5;
+  const srHigh = srP >= 0.5;
+  if (mrHigh && !srHigh) return 'highMR_lowSR';
+  if (!mrHigh && srHigh) return 'lowMR_highSR';
+  if (!mrHigh && !srHigh) return 'lowMR_lowSR';
+  return 'balanced';
 }
 
 function calcAge(birth, asOf) {
@@ -480,6 +526,19 @@ function buildReportHTML() {
       span.textContent = inp.value || '';
       inp.parentNode.replaceChild(span, inp);
     }
+  });
+
+  // 2-1) 선택칸(select)은 복제하면 고른 값이 사라지므로, 화면에서 고른 글자로 바꿔 넣는다
+  //      (따로 인쇄용 글자(.print-only)가 옆에 있으면 선택칸만 지운다)
+  const origSelects = report.querySelectorAll('select');
+  clone.querySelectorAll('select').forEach((sel, i) => {
+    const o = origSelects[i];
+    if (sel.parentNode.querySelector('.print-only')) { sel.remove(); return; }
+    const span = document.createElement('span');
+    span.className = 'static-text';
+    const opt = o && o.selectedIndex >= 0 ? o.options[o.selectedIndex] : null;
+    span.textContent = o && o.value ? (opt ? opt.text : o.value) : '';
+    sel.parentNode.replaceChild(span, sel);
   });
 
   // 3) no-print 요소 제거 (예시 버튼, 안내 배너 등)
@@ -686,10 +745,22 @@ const STAGE_DECISION = {
 
 // ── 채점 기준 공통 ─────────────────────────────────────────────────
 const SCORING_LEGEND = [
-  { score: 2, label: '일관성 있게 도달', desc: '두 가지 상황에서 두 명의 파트너에 걸쳐 준거에 도달' },
+  { score: 2, label: '일관성 있게 도달', desc: '두 가지 이상의 상황에서 두 명 이상의 파트너에 걸쳐 준거에 도달' },
   { score: 1, label: '부분적 도달', desc: '일관성 없이/하나의 활동에서/보조를 받아 도달' },
   { score: 0, label: '미도달', desc: '관찰 또는 보고에 근거할 때 준거에 도달하지 못함' },
 ];
+
+// ★ 2점 기준의 파트너 수 — 1권 8장 단계별 채점 기준(274·312·356쪽):
+//   사회적 파트너·언어 파트너 = 두 명 이상, 대화 파트너 = 세 명 이상 (두 가지 이상의 상황)
+function partnerCountWord(stage) {
+  return stage === 'conversation' ? '세' : '두';
+}
+function scoringLegendFor(stage) {
+  const n = partnerCountWord(stage);
+  return SCORING_LEGEND.map((l) => (l.score === 2
+    ? { ...l, desc: `두 가지 이상의 상황에서 ${n} 명 이상의 파트너에 걸쳐 준거에 도달` }
+    : l));
+}
 
 // ── 사회-정서 성장 지표 (모든 단계 공통) ───────────────────────
 const SES_INDICATORS = [
@@ -702,6 +773,68 @@ const SES_INDICATORS = [
   { id: 'independence', label: '독립성' },
   { id: 'belonging', label: '사회적 소속감 및 우정' },
 ];
+// ★ 사회-정서 성장 지표 = 정해진 교수목표 5개의 점수 합(0~10점)
+//   1권 <표 7-5>(258쪽), 265쪽 "각 지표는 5개 교수목표에 근거하며, 가능한 총점은 10점"
+//   (2권 사례 재호의 '사회적 소속감 4점'으로 계산법 확인함)
+const SES_ITEMS = {
+  social: {
+    happiness: ['JA3.2', 'JA5.4', 'MR1.1', 'MR2.4', 'SR1.7'],
+    selfAwareness: ['JA4.4', 'JA7.1', 'MR2.6', 'MR3.3', 'SR4.1'],
+    otherAwareness: ['JA1.3', 'JA5.4', 'SU2.7', 'MR2.4', 'MR2.5'],
+    activeLearning: ['SU1.3', 'SU1.4', 'SU3.4', 'SU4.7', 'SR2.1'],
+    flexibility: ['JA7.3', 'MR4.3', 'SR3.1', 'SR4.3', 'SR4.4'],
+    cooperation: ['JA1.1', 'SU2.7', 'SU4.5', 'MR2.1', 'SR4.2'],
+    independence: ['JA4.4', 'SU2.6', 'MR2.6', 'SR3.3', 'SR4.1'],
+    belonging: ['JA1.4', 'JA2.1', 'JA5.1', 'MR2.3', 'SR1.4'],
+  },
+  language: {
+    happiness: ['JA3.1', 'JA5.2', 'MR1.2', 'MR2.5', 'SR1.8'],
+    selfAwareness: ['JA4.4', 'JA7.1', 'MR3.4', 'MR3.7', 'SR5.1'],
+    otherAwareness: ['JA3.4', 'JA5.4', 'SU2.4', 'MR2.4', 'MR2.7'],
+    activeLearning: ['SU1.4', 'SU3.4', 'MR2.7', 'MR3.3', 'SR4.1'],
+    flexibility: ['JA7.2', 'SR2.3', 'SR4.1', 'SR5.4', 'SR5.5'],
+    cooperation: ['JA5.7', 'SU2.3', 'SU4.1', 'SU5.6', 'SR1.5'],
+    independence: ['JA4.4', 'MR2.6', 'MR3.5', 'SR5.1', 'SR5.3'],
+    belonging: ['JA1.1', 'JA2.3', 'JA5.4', 'JA8.3', 'MR2.3'],
+  },
+  conversation: {
+    happiness: ['JA2.1', 'JA3.2', 'JA5.6', 'MR1.5', 'SR1.6'],
+    selfAwareness: ['JA1.2', 'JA5.6', 'SU1.4', 'SU5.2', 'MR1.3'],
+    otherAwareness: ['JA1.4', 'JA4.3', 'JA4.5', 'JA4.7', 'JA5.6'],
+    activeLearning: ['JA5.3', 'SU1.3', 'SU3.4', 'SR3.5', 'SR4.2'],
+    flexibility: ['JA5.4', 'MR3.5', 'SR5.5', 'SR5.6', 'SR6.4'],
+    cooperation: ['SU3.6', 'SU6.1', 'SU6.4', 'MR3.5', 'SR1.4'],
+    independence: ['JA3.1', 'SU1.4', 'SR6.1', 'SR6.2', 'SR6.3'],
+    belonging: ['JA4.7', 'JA4.8', 'SU3.7', 'MR2.3', 'MR3.4'],
+  },
+};
+
+// 문항 점수로 성장 지표 계산. 채점한 문항이 하나도 없으면 null
+function computeSes(stage, scores) {
+  const map = SES_ITEMS[stage];
+  const sc = scores || {};
+  if (!map || !Object.values(sc).some((v) => typeof v === 'number')) return null;
+  const values = {};
+  const detail = {};
+  Object.entries(map).forEach(([id, items]) => {
+    let sum = 0, unscored = 0;
+    const parts = items.map((it) => {
+      const v = sc[it];
+      if (typeof v === 'number') sum += v; else unscored += 1;
+      return { id: it, score: typeof v === 'number' ? v : null };
+    });
+    values[id] = sum;
+    detail[id] = { parts, unscored };
+  });
+  return { values, detail };
+}
+
+// 세션의 성장 지표: 문항 점수가 있으면 계산값, 하나도 없으면 예전에 손으로 정해 둔 값
+function sesOf(session, stage) {
+  if (!session) return {};
+  const c = computeSes(session.stage || stage, session.scores);
+  return c ? c.values : (session.ses || {});
+}
 
 // =====================================================================
 // 사회적 파트너 단계 진단 항목
@@ -1891,7 +2024,7 @@ const STAGE_PROFILE = {
   social: {
     headline: '사회적 파트너 단계',
     subtitle: '의도적 의사소통의 시작',
-    age: '발달적 약 12~24개월 수준',
+    age: '발달적 약 6~12개월 수준',
     summary:
       '아직 단어를 거의 사용하지 않거나, 3개 미만의 단어/구를 사용하는 단계입니다. ' +
       '의사소통은 주로 시선, 얼굴 표정, 몸짓, 발성을 통해 이루어지며, ' +
@@ -1913,7 +2046,7 @@ const STAGE_PROFILE = {
   language: {
     headline: '언어 파트너 단계',
     subtitle: '상징적 의사소통의 확장',
-    age: '발달적 약 2~3세 수준',
+    age: '발달적 약 1~2세 수준',
     summary:
       '3개 이상의 단어/구를 의도적으로 사용하지만, 100개 미만이거나 창의적 단어 조합이 부족한 단계입니다. ' +
       '단어와 단어 조합으로 의도를 표현하기 시작하며, ' +
@@ -1935,7 +2068,7 @@ const STAGE_PROFILE = {
   conversation: {
     headline: '대화 파트너 단계',
     subtitle: '사회적 담화로의 진입',
-    age: '발달적 약 3세 이후',
+    age: '유아기(약 20~30개월)에 시작해 학령기까지',
     summary:
       '100개 이상의 어휘와 창의적 단어 조합을 정기적으로 사용하는 단계입니다. ' +
       '대화 규칙, 청자 고려, 정서의 미묘한 차이를 다루며, ' +
@@ -2065,6 +2198,40 @@ const EQUIVALENT_ITEMS = {
     ['JA3.4', 'MR2.5'],
     ['SU2.1', 'SR3.1'],
   ],
+  // ★ 1권 부록 언어 파트너 관찰 기록지의 '=' 표시 (양쪽 문항 모두에 표시된 9쌍)
+  language: [
+    ['JA1.1', 'SR1.1'],
+    ['JA1.2', 'SR1.2'],
+    ['JA1.3', 'SR1.3'],
+    ['JA2.2', 'SU2.2'],
+    ['JA3.1', 'MR1.1'],
+    ['JA3.3', 'MR2.5'],
+    ['MR1.2', 'SR3.5'],
+    ['SR1.6', 'SU6.2'],
+    ['SR4.2', 'SU2.1'],
+  ],
+  // ★ 1권 부록 대화 파트너 관찰 기록지의 '=' 표시 (19쌍. JA2.1=MR1.1=SR3.1처럼 셋이 같은 것도 있음)
+  conversation: [
+    ['JA1.1', 'SR1.2'],
+    ['JA2.1', 'MR1.1'],
+    ['JA2.1', 'SR3.1'],
+    ['JA2.3', 'MR1.2'],
+    ['JA2.3', 'SR3.2'],
+    ['JA2.5', 'MR1.3'],
+    ['JA2.5', 'SR3.3'],
+    ['JA2.6', 'SU2.2'],
+    ['JA3.1', 'MR4.3'],
+    ['JA3.2', 'MR4.4'],
+    ['JA3.3', 'MR4.5'],
+    ['JA4.1', 'SR1.3'],
+    ['MR1.1', 'SR3.1'],
+    ['MR1.2', 'SR3.2'],
+    ['MR1.3', 'SR3.3'],
+    ['MR3.3', 'SU1.2'],
+    ['MR3.4', 'SU1.5'],
+    ['SR4.1', 'SU1.3'],
+    ['SR4.3', 'SU1.4'],
+  ],
 };
 
 // 항목 ID → 동등 항목 ID 목록 (양방향 조회용)
@@ -2112,13 +2279,13 @@ const MR_SR_BRIDGE = {
   lowMR_lowSR: {
     title: '"조절 토대 형성 필요" 패턴',
     interpretation:
-      '상호조절과 자기조절 모두 낮은 수준입니다. 자기조절은 상호조절 경험 위에서 발달하므로, ' +
-      'MR 항목을 먼저 안정화하는 것이 발달적으로 우선됩니다.',
+      '상호조절과 자기조절 모두 절반 미만으로 상대적 요구에 해당합니다. ' +
+      '두 능력은 발달 내내 서로 의존하므로 함께 지원합니다.',
     strategies: [
       '파트너의 반응성·예측가능성 확보 (IS1 영역 강조)',
       '아동이 좋아하는 감각 자극이나 활동으로 진정·각성 조절 시범',
       '간단한 신호(예: 그림 카드)로 도움 요청을 가르치기',
-      '안정 후 단계적으로 자기조절 전략(혼자서 할 수 있는 행동) 도입',
+      '파트너 지원과 함께 아동이 혼자서 할 수 있는 자기조절 행동 전략도 연습',
     ],
   },
   // 둘 다 높음
@@ -2203,14 +2370,12 @@ const FOUNDATION_ITEMS = {
 
 // ── 사회-정서 성장 지표 해석 가이드 ──────────────────────────────
 const SES_INTERPRETATION = {
-  // 점수대별 해석 (0-10 스케일)
+  // ★ 책 기준(1권 265쪽): 5개 미만의 칸 = 상대적 요구, 5개 이상의 칸 = 상대적 강점
   ranges: [
-    { min: 0, max: 3, label: '발달 초기', color: '#b54a3a',
-      meaning: '이 지표 영역에서 발달이 초기 단계에 있습니다. 기초적인 경험과 지원이 우선됩니다.' },
-    { min: 4, max: 6, label: '발달 중', color: '#c19a3a',
-      meaning: '발달이 진행 중이며, 일관성과 다양한 상황으로의 확장이 다음 과제입니다.' },
-    { min: 7, max: 10, label: '안정적 발달', color: '#2d4a3e',
-      meaning: '이 영역은 비교적 안정적입니다. 더 복잡한 상황과 또래 관계로 확장할 수 있습니다.' },
+    { min: 0, max: 4, label: '상대적 요구', color: '#b54a3a',
+      meaning: '10칸 중 5칸 미만으로, 상대적 요구에 해당합니다.' },
+    { min: 5, max: 10, label: '상대적 강점', color: '#2d4a3e',
+      meaning: '10칸 중 5칸 이상으로, 상대적 강점에 해당합니다.' },
   ],
 };
 
@@ -2421,8 +2586,8 @@ const LP_INTERVIEW = {
       key: 'social',
       title: '사회 의사소통',
       questions: [
-        { id: 'lp_sc_1', type: 'text', q: '다른 사람과 어떻게 상호작용하는지 기술하시오.' },
-        { id: 'lp_sc_2', type: 'text', q: '상호작용을 하는 동안 시선을 어떻게 사용하는지 기술하시오.' },
+        { id: 'lp_sc_1', type: 'text', q: '다른 사람과 어떻게 상호작용하는지 기술하시오. 예를 들어, 다른 사람의 상호작용 시도에 반응하는가? 상호작용을 시작하는가? 두세 번 정도 차례를 주고받는가? 파트너와 관심을 공유하면서 여러 번 차례를 주고받는가?' },
+        { id: 'lp_sc_2', type: 'text', q: '상호작용을 하는 동안 시선을 어떻게 사용하는지 기술하시오. 예를 들어, 사람을 전혀 또는 거의 쳐다보지 않는가, 아니면 자주 쳐다보는가? 놀잇감을 가지고 놀 때 당신이 지켜보는지를 살피기 위해 고개를 들어 쳐다본 다음 다시 물건을 향해 시선을 옮기는가?' },
         {
           id: 'lp_sc_3',
           type: 'checklist',
@@ -2443,6 +2608,7 @@ const LP_INTERVIEW = {
             '"더" 또는 "또"의 의미를 나타내는 방법',
             '"아니" 또는 "없네(gone)"의 의미를 나타내는 방법',
             '인사말(예: "안녕" "바이바이" "또 만나")',
+            '행위 단어(예: "먹는다" "달린다" "간다")',
             '사물을 설명하는 수식어나 단어(예: "뜨거운" "큰" "냄새 나는")',
             '자발적인 단어 조합(예: "밖에 나가" "과자 없어")',
           ],
@@ -2464,18 +2630,23 @@ const LP_INTERVIEW = {
           partners: ['친숙한 사람과 함께', '친숙하지 않은 사람과 함께', '소집단 내에서'],
         },
         { id: 'lp_sc_7', type: 'text', q: '아동의 요구를 알아채지 못할 때 어떤 일이 발생하는가? 아동은 어떻게 행동하는가?' },
-        { id: 'lp_sc_8', type: 'text', q: '아동이 가장 좋아하는 놀잇감이나 활동은 무엇인가? 그것을 가지고 어떻게 놀이하는가?' },
-        { id: 'lp_sc_9', type: 'text', q: '친숙한 성인/또래/형제가 놀이에 끼어들면 아동은 어떻게 반응하는가?' },
+        { id: 'lp_sc_8', type: 'text', q: '아동이 가장 좋아하는 놀잇감은 무엇인가? 그것을 가지고 어떻게 놀이하는가?' },
+        { id: 'lp_sc_9', type: 'text', q: '친숙한 성인이 놀이에 끼어들면 아동은 어떻게 반응하는가? 친숙한 또래나 형제가 끼어들면 어떻게 반응하는가?' },
+        {
+          id: 'lp_sc_imit', type: 'frequency',
+          q: '다른 사람이 시범을 보인 행동이나 소리에 대해 어떻게 반응하는가?',
+          partners: ['익숙한 행동이나 소리를 모방하는가?', '새로운 행동이나 소리를 모방하는가?', '새로운 상황에서 행동을 모방하는가?'],
+        },
         {
           id: 'lp_sc_10', type: 'checklist',
-          q: '다음 중 일관성 있게 이해하는 의미나 비구어 단서에 모두 표시하시오.',
+          q: '다음의 교수나 단서 중 아동이 이해하는 것에 모두 표시하시오.',
           options: [
-            '가리키기 외의 몸짓', '가리키기', '사진이나 그림',
+            '가리키기 외의 몸짓', '가리키기', '사진이나 그림', '글자',
             '얼굴 표정', '억양', '아동의 이름',
-            '한 단어로 된 지시', '두 단어 이상의 지시',
-            '상황 단서가 없을 때의 단일 명사',
           ],
           withText: [
+            { id: 'familiar', label: '익숙한 상황에서의 단어 또는 구(예를 적으시오)' },
+            { id: 'noun', label: '상황 단서가 없을 때 사람이나 물건의 이름(예를 적으시오)' },
             { id: 'verb', label: '상황 단서가 없을 때 동사나 수식어(예를 적으시오)' },
             { id: 'phrase', label: '상황 단서가 없을 때 구나 문장(예를 적으시오)' },
           ],
@@ -2486,11 +2657,11 @@ const LP_INTERVIEW = {
       key: 'emo',
       title: '정서 조절',
       questions: [
-        { id: 'lp_er_1', type: 'text', q: '아동은 자신의 환경 내에 있는 사람과 사물에 대해 어떻게 반응하는가?' },
+        { id: 'lp_er_1', type: 'text', q: '아동은 자신의 환경 내에 있는 사람과 사물에 대해 어떻게 반응하는가? 예를 들어, 다양한 상황에 흥미를 보이는지, 몇 가지에 대해서만 강한 흥미를 보이는지, 다양한 감정을 나타내는지, 혼자 지내는지, 상호작용을 위한 시도에 반응하거나 상호작용을 하기 위해 노력하는지 등을 기술하시오.' },
         { id: 'lp_er_2', type: 'text', q: '가장 재미있어 하거나 흥미를 보이는 활동 또는 상황은 무엇인가?' },
         { id: 'lp_er_3', type: 'text', q: '가장 힘들어하거나 지루해하는 활동 또는 상황은 무엇인가?' },
-        { id: 'lp_er_4', type: 'text', q: '친숙한 활동을 하는 동안 집중과 흥미를 유지하기 위해서 또는 진정하거나 활동에 참여하기 위해서 전략을 사용하는가(예: 양손을 꽉 쥐기, 담요 문지르기, 몸 흔들기, "끝나면 밖에 나가요?"라고 말하기)?' },
-        { id: 'lp_er_5', type: 'text', q: '새롭고 변화된 상황이나 그 밖의 도전적인 상황에서 집중과 흥미를 유지하기 위해서 또는 진정하거나 활동에 참여하기 위해서 전략을 사용하는가(예: 활동이 바뀔 때 친숙한 노래 부르기, 두려움을 느낄 때 "걱정하지 마"라고 말하기)?' },
+        { id: 'lp_er_4', type: 'text', q: '친숙한 활동을 하는 동안 집중과 흥미를 유지하기 위해서 또는 진정하거나 활동에 참여하기 위해서 전략을 사용하는가(예: 양손을 꽉 쥐기, 담요 문지르기, 몸 흔들기, "끝나면 밖에 나가요?"라고 말하기)? 만일 그렇다면, 그 전략을 구체적으로 기술하시오.' },
+        { id: 'lp_er_5', type: 'text', q: '새롭고 변화된 상황이나 그 밖의 도전적인 상황에서 집중과 흥미를 유지하기 위해서 또는 진정하거나 활동에 참여하기 위해서 전략을 사용하는가(예: 활동이 바뀔 때 친숙한 노래 부르기, 두려움을 느낄 때 "걱정하지 마"라고 말하기)? 만일 그렇다면, 그 전략을 구체적으로 기술하시오.' },
         {
           id: 'lp_er_6',
           type: 'emotionPairs',
@@ -2505,12 +2676,12 @@ const LP_INTERVIEW = {
         { id: 'lp_er_8', type: 'text', q: '다른 사람이 선택하라고 요구할 때 반응하는가? 만일 그렇다면, 어떻게 반응하는가?' },
         { id: 'lp_er_9', type: 'text', q: '아동이 집중하고, 흥미를 갖고, 진정하고, 참여를 유지하도록 돕기 위해 어떤 전략을 사용하는가?' },
         { id: 'lp_er_10', type: 'text', q: '아동이 흥분하거나 화가 났다는 것을 어떻게 알 수 있는가? 아동은 어떤 신호를 보이는가?' },
-        { id: 'lp_er_11', type: 'text', q: '아동이 지루해하거나 흥미가 없다는 것을 어떻게 알 수 있는가?' },
+        { id: 'lp_er_11', type: 'text', q: '아동이 지루해하거나 흥미가 없다는 것을 어떻게 알 수 있는가? 아동은 어떤 신호를 보이는가?' },
         {
           id: 'lp_er_12', type: 'recoveryPair',
           q: '아동은 매우 심하게 화가 나거나 괴로울 때',
-          self: '어떻게 스스로 회복하는가?',
-          partner: '파트너가 어떻게 도움을 줄 때 회복되는가?',
+          self: '어떻게 스스로 회복하는가? 보통 회복되기까지 얼마나 오래 걸리는가?',
+          partner: '파트너가 어떻게 도와줄 때 회복되는가? 보통 회복되기까지 얼마나 오래 걸리는가?',
         },
       ],
     },
@@ -2518,11 +2689,11 @@ const LP_INTERVIEW = {
       key: 'ts',
       title: '교류 지원',
       questions: [
-        { id: 'lp_ts_1', type: 'text', q: '아동이 정기적으로 상호작용을 하거나 일상적으로 만나는 사람은 누구인가?' },
-        { id: 'lp_ts_2', type: 'text', q: '아동이 정기적으로 가는 장소는 어디인가?' },
+        { id: 'lp_ts_1', type: 'text', q: '아동이 정기적으로(매일 또는 매주) 상호작용을 하거나 일상적으로 만나는 사람은 누구인가?' },
+        { id: 'lp_ts_2', type: 'text', q: '아동이 정기적으로(매일 또는 매주) 가는 장소는 어디인가?' },
         {
           id: 'lp_ts_3', type: 'scale02List',
-          q: '다음 중 쉽게 파악하거나 따르거나 반응할 수 있는 것 (0/1/2)',
+          q: '다음 중 쉽게 파악하거나 따르거나 반응할 수 있는 것은 모두 다음의 숫자로 표시하시오: 거의 또는 전혀 파악할 수 없거나 반응할 수 없다면 0, 가끔씩 파악하거나 반응할 수 있다면 1, 대부분의 경우 파악하거나 반응할 수 있다면 2.',
           items: [
             '아동이 관심을 갖는 대상', '아동이 의사소통하려고 하는 것',
             '아동의 감정 상태', '아동이 선호하는 속도(빠름 또는 느림)',
@@ -2530,17 +2701,18 @@ const LP_INTERVIEW = {
             '아동이 좌절했는지 여부', '아동이 흥분했는지 여부',
           ],
         },
-        { id: 'lp_ts_4', type: 'text', q: '아동이 의사소통을 시작하도록 격려하는 데에 가장 도움이 되는 전략은 무엇인가?' },
-        { id: 'lp_ts_5', type: 'text', q: '문제행동을 보일 때 보통 어떻게 반응하는가? 그러한 반응이 효과적인가?' },
-        { id: 'lp_ts_6', type: 'text', q: '아동의 주의를 끄는 데에 가장 도움이 되는 전략은 무엇인가?' },
-        { id: 'lp_ts_7', type: 'text', q: '아동과의 상호작용을 유지하는 데에 가장 도움이 되는 전략은 무엇인가?' },
+        { id: 'lp_ts_4', type: 'text', q: '아동이 의사소통을 시작하도록 격려하는 데에 가장 도움이 되는 전략은 무엇인가(예: 선택할 기회 제공하기, 아동을 기다리며 쳐다보기, 내 차례가 지난 후 기다리기)?' },
+        { id: 'lp_ts_5', type: 'text', q: '아동이 때리거나 소리를 지르거나 깨무는 등 문제행동을 보일 때 당신은 보통 어떻게 반응하는가? 그러한 반응이 효과적인가?' },
+        { id: 'lp_ts_6', type: 'text', q: '아동의 주의를 끄는 데에 가장 도움이 되는 전략은 무엇인가(예: 아동의 수준에 맞추기, 아동에게 가까이 다가가거나 멀리 떨어지기, 아동의 감정에 맞추기, 아동을 기다리고 따르기)?' },
+        { id: 'lp_ts_7', type: 'text', q: '아동과의 상호작용을 유지하는 데에 가장 도움이 되는 전략은 무엇인가(예: 아동이 상호작용을 시작하게 하기, 아동이 휴식을 취한 후 계속하게 하기, 아동의 흥미를 따르기)?' },
         { id: 'lp_ts_8', type: 'text', q: '아동에게 전달한 메시지를 이해했는지 확인하기 위해서 아동에게 주로 어떻게 의사소통을 하는가?' },
-        { id: 'lp_ts_9', type: 'text', q: '시각적 지원을 사용하는가? 만일 그렇다면, 어떤 지원을 사용하는가?' },
-        { id: 'lp_ts_10', type: 'text', q: '아동이 참여를 유지하는 데 도움이 되는 물리적 또는 사회적 환경 특성은 무엇인가?' },
-        { id: 'lp_ts_11', type: 'text', q: '아동이 의사소통을 더 잘 하도록 돕는 물리적 또는 사회적 환경 특성은 무엇인가?' },
+        { id: 'lp_ts_9', type: 'text', q: '아동이 의사소통을 하고, 언어를 이해하고, 감정을 표현하고, 순조로운 일과를 진행하도록 도와주기 위해서 시각적 지원을 사용하는가? 만일 그렇다면, 어떤 지원을 사용하는가(예: 그림으로 과제의 단계 보여 주기, 전이용 사물, 선택용 그림, 수어)?' },
+        { id: 'lp_ts_10', type: 'text', q: '아동이 참여를 유지하는 데 도움이 되는 물리적 또는 사회적 환경 특성은 무엇인가(예: 아동이 상호작용하는 사람의 수 제한하기, 배경 소음 또는 시각적인 혼잡함 줄이기, 움직임이나 리듬을 위한 기회 더 많이 주기, 특정 활동을 위해 특정 장소를 일관성 있게 사용하기)?' },
+        { id: 'lp_ts_11', type: 'text', q: '아동이 의사소통을 더 잘 하도록 돕는 물리적 또는 사회적 환경 특성은 무엇인가(예: 아동이 좋아해서 동기를 유발할 수 있는 놀잇감이나 활동 이용하기, 좋아할 만한 또는 좋아하는 물건을 조금 멀리 두기)?' },
       ],
     },
-    { ...SP_INTERVIEW.sections[3], questions: SP_INTERVIEW.sections[3].questions.map((q) => ({ ...q, id: q.id.replace('sp_', 'lp_') })) },
+    // ★ 추가 의견 — 언어 파트너 질문지(1권 438쪽)는 4번이 '아동에 대해 알아야 할…'('우리가' 없음)
+    { ...SP_INTERVIEW.sections[3], questions: SP_INTERVIEW.sections[3].questions.map((q) => ({ ...q, id: q.id.replace('sp_', 'lp_'), q: q.q.replace('아동에 대해 우리가 알아야 할', '아동에 대해 알아야 할') })) },
   ],
 };
 
@@ -2551,56 +2723,73 @@ const CP_INTERVIEW = {
   stage: 'conversation',
   intro: SP_INTERVIEW.intro,
   meta: SP_INTERVIEW.meta,
+  // ★ 1권 부록 대화 파트너 SCERTS 진단-질문지(456~462쪽) 그대로.
+  //   예전 질문지와 뜻이 달라진 질문은 새 번호(cpb_)를 쓰고, 예전 답은 RETIRED_INTERVIEW_QUESTIONS로 계속 보여 준다
   sections: [
     {
       key: 'social',
       title: '사회 의사소통',
       questions: [
-        { id: 'cp_sc_1', type: 'text', q: '다른 사람과 어떻게 상호작용하는지 기술하시오. 청자/화자 역할을 바꾸며 대화를 주고받는가?' },
-        { id: 'cp_sc_2', type: 'text', q: '상호작용 중 시선/얼굴표정/몸짓을 어떻게 사용하는지 기술하시오.' },
+        { id: 'cp_sc_1', type: 'text', q: '다른 사람과 어떻게 상호작용하는지 기술하시오. 예를 들어, 파트너가 하고 있는 일을 주시하는가? 말하기 전에 상대방의 주의를 끌기 위한 행동을 하는가? 파트너와 관심을 공유하면서 여러 번 차례를 주고받는가?' },
         {
-          id: 'cp_sc_3', type: 'checklist',
-          q: '다음 중 아동이 일관성 있게 사용하는 의사소통 기능을 모두 표시하시오.',
+          id: 'cpb_sc_2', type: 'checklist',
+          q: '아동이 대화 중 의사소통을 하는 이유는 무엇인가? 다음 중 해당되는 것에 표시하고 예를 적으시오.',
           options: [
-            '원하는 것 요구하기', '도움 청하기', '거절/거부하기',
-            '인사하기', '허락 구하기', '경험 공유하기',
-            '관심 끌기', '정보 요구하기', '정보 제공하기',
-            '감정 표현하기', '의견 또는 생각 공유하기', '농담/유머 사용하기',
+            '원하는 물건을 요구하거나 도움 청하기', '휴식 요구하기', '원하지 않는 활동을 거절/거부하기',
+            '인사하기', '허락 구하기', '공감 표현하기',
+            '현재와 과거의 사건에 대해 이야기하기', '현재와 과거의 사건에 대해 정보 요구하기',
+            '감정과 의견 표현하기', '앞으로의 계획을 세우고 일어날 일에 대해 의논하기',
           ],
         },
+        { id: 'cpb_sc_3', type: 'text', q: '아동의 요구를 알아채지 못할 때 어떤 일이 발생하는가? 아동은 어떻게 행동하는가?' },
         {
-          id: 'cp_sc_4', type: 'checklist',
-          q: '다음 중 아동이 일관성 있게 사용하는 언어 형태를 모두 표시하시오.',
+          id: 'cpb_sc_4', type: 'checklist',
+          q: '다음 중 아동이 문장에서 일상적으로 사용하는 단어 형태에 해당하는 것을 모두 표시하고 구체적인 예를 적으시오.',
           options: [
-            '단일 명사', '동사', '서술어/형용사', '대명사',
-            '시제(현재, 과거, 미래)', '단어 조합(2~3어 조합)',
-            '간단한 문장(주어+동사+목적어)', '복문(접속사 사용)',
-            '의문문', '부정문',
-          ],
-          withText: [
-            { id: 'time', label: '시간을 나타내는 단어(예: 전에, 지금, 나중에, 언제)' },
-            { id: 'place', label: '장소를 나타내는 단어' },
-            { id: 'attribute', label: '속성/수식 단어' },
+            '의문사(예: 무엇, 어디, 누구)',
+            '시간을 나타내는 단어(예: 전에, 지금, 나중에, 언제)',
+            '크기나 수를 나타내는 단어(예: 작은, 많이)',
+            '장소를 나타내는 단어(예: 옆에, 사이에, 아래에)',
+            '대명사(예: 나/너, 그/그녀, 우리/그들)',
+            '동사(예: 과거형, 현재형, 미래형 시제[먹었다, 달렸다, 갈 거야])',
+            '등위접속사(예: 그리고, 또는)',
+            '종속접속사(예: 그러나, 그래서, 왜냐하면, 만일)',
           ],
         },
         {
-          id: 'cp_sc_5', type: 'frequency',
-          q: '상호작용할 때 얼마나 자주 의사소통/대화를 시작하는가?',
-          partners: ['친숙한 성인과 함께', '친숙한 또래와 함께', '친숙하지 않은 사람과 함께', '소집단 내에서', '대집단 내에서'],
+          id: 'cpb_sc_5', type: 'checklist',
+          q: '다음 중 아동이 일상적으로 따르는 대화의 \'규칙\'에 해당하는 것을 모두 표시하고 예를 적으시오.',
+          options: [
+            '다양한 주제로 대화를 시작한다', '자주 주제를 시작한다',
+            '다른 사람에게 관심 있는 것에 대해 이야기한다',
+            '청자와 화자로서 적절히 차례를 지키며 대화한다',
+            '다른 사람이 알고 있는 것에 따라 필요한 정보를 제공한다',
+            '관련된 정보를 요구한다',
+            '상대방의 행동에 따라 자기 차례의 길이를 조절한다',
+            '자연스럽게 주제를 바꾼다', '정중하게 대화를 끝낸다',
+          ],
         },
-        { id: 'cp_sc_6', type: 'text', q: '대화가 잘못되거나 의사소통이 실패할 때 아동은 어떻게 행동하는가? 명료화를 요구하는가?' },
-        { id: 'cp_sc_7', type: 'text', q: '관심 있는 주제나 대화 시 주제를 어떻게 유지하는가? 한 주제에 머무는 시간은 얼마나 되는가?' },
-        { id: 'cp_sc_8', type: 'text', q: '또래와의 우정 관계를 어떻게 맺고 유지하는가?' },
-        { id: 'cp_sc_9', type: 'text', q: '유머, 농담, 비유 표현, 놀림 등을 이해하고 사용하는가?' },
         {
-          id: 'cp_sc_10', type: 'checklist',
+          id: 'cpb_sc_6', type: 'checklist',
+          q: '다음 중 아동이 대화를 하는 동안 적절하게 사용하는 비구어 행동에 해당하는 것을 모두 표시하시오.',
+          options: [
+            '얼굴 표정', '몸짓', '자세',
+            '상대방과의 근접성이나 물리적 거리', '목소리의 성량 또는 세기', '억양 또는 운율',
+          ],
+        },
+        { id: 'cpb_sc_7', type: 'text', q: '가장 좋아하는 놀잇감, 게임, 놀이 활동은 무엇인가? 어떻게 놀이를 하고 즐기는가?' },
+        { id: 'cpb_sc_8', type: 'text', q: '가장 좋아하는 친구는 누구인가? 그 친구와 함께 하기를 원하거나 이야기하고 싶어 하는 것은 무엇인가?' },
+        {
+          id: 'cpb_sc_9', type: 'frequency',
+          q: '집단 상황에서 어떻게 학습하는가?',
+          partners: ['새로운 상황에서 행동을 모방하는가?', '성인이 시범을 보이면 규칙을 학습하는가?', '또래와 협력하거나 협상하는가?'],
+        },
+        {
+          id: 'cpb_sc_10', type: 'checklist',
           q: '다음 중 일관성 있게 이해하는 의미나 비구어 단서에 모두 표시하시오.',
           options: [
-            '얼굴 표정', '억양', '몸짓 단서',
-            '청자의 지식에 따른 정보 조절', '청자의 관심에 따른 주제 조절',
-            '대화 차례 주고받기 단서', '주제 전환 단서',
-            '관심 초점 변화 단서',
-            '유머/비유 표현의 비문자적 의미', '놀림/비꼬는 말의 비문자적 의미',
+            '차례를 바꾸기 위한 비구어 단서', '감정에 대한 비구어 단서', '유머',
+            '비유적인 표현', '놀리기', '비꼬는 말', '속이는 말',
           ],
         },
       ],
@@ -2609,33 +2798,34 @@ const CP_INTERVIEW = {
       key: 'emo',
       title: '정서 조절',
       questions: [
-        { id: 'cp_er_1', type: 'text', q: '아동은 자신의 환경 내에 있는 사람과 사물에 어떻게 반응하는가?' },
-        { id: 'cp_er_2', type: 'text', q: '가장 흥미를 보이는 활동은 무엇인가?' },
-        { id: 'cp_er_3', type: 'text', q: '가장 힘들어하는 활동 또는 상황은 무엇인가?' },
-        { id: 'cp_er_4', type: 'text', q: '익숙한 활동에서 자기조절을 위해 사용하는 행동/언어/초인지 전략을 기술하시오.' },
-        { id: 'cp_er_5', type: 'text', q: '새롭고 변화된 상황에서 사용하는 자기조절 전략을 기술하시오.' },
+        { id: 'cp_er_1', type: 'text', q: '아동은 자신의 환경 내에 있는 사람과 사물에 대해 어떻게 반응하는가? 예를 들어, 다양한 상황에 흥미를 보이는지, 몇 가지에 대해서만 강한 흥미를 보이는지, 다양한 감정을 나타내는지, 혼자 지내는지, 상호작용을 위한 시도에 반응하거나 상호작용을 하기 위해 노력하는지, 활동이나 행동을 억제하는지, 자신의 능력에 맞는 과제를 지속해서 수행하는지 등을 기술하시오.' },
+        { id: 'cp_er_2', type: 'text', q: '가장 재미있어 하거나 흥미를 보이는 활동 또는 상황은 무엇인가?' },
+        { id: 'cp_er_3', type: 'text', q: '가장 힘들어하거나 지루해하는 활동 또는 상황은 무엇인가?' },
+        { id: 'cp_er_4', type: 'text', q: '친숙한 활동을 하는 동안 집중과 흥미를 유지하기 위해서 또는 진정하거나 활동에 참여하기 위해서 전략을 사용하는가(예: 천이나 다른 물건을 입에 넣거나 깨물기, 만지작거리기, 몸 흔들기, 일과 순서를 반복적으로 말하기, 과제 진행을 점검하기 위해 체크리스트 활용하기)? 만일 그렇다면, 그 전략을 구체적으로 기술하시오.' },
+        { id: 'cp_er_5', type: 'text', q: '새롭고 변화된 상황이나 그 밖의 도전적인 상황에서 집중과 흥미를 유지하기 위해서 또는 진정하거나 활동에 참여하기 위해서 전략을 사용하는가(예: "다 썼어"라고 말한 후 다음에 무엇을 해야 하는지 보기 위해 시간표 확인하기, 기다려야 하는 상황에서 스트레스를 낮추기 위해 감정을 표현하거나 정보를 요구하기)? 만일 그렇다면, 그 전략을 구체적으로 기술하시오.' },
         {
-          id: 'cp_er_6',
+          id: 'cpb_er_6',
           type: 'emotionPairs',
           q: '구어 또는 비구어 수단으로 긍정적인 감정과 부정적인 감정을 표현하는가? 만일 그렇다면, 어떻게 표현하는가?',
           pairs: [
             ['기쁨', '슬픔'],
             ['만족감', '분노 또는 좌절'],
             ['익살스러움', '두려움'],
-            ['자부심/성취감', '실망감/창피함'],
-            ['놀라움', '걱정/불안'],
+            ['흥분', '질병 또는 피로'],
+            ['흥미', '불안, 스트레스 또는 걱정'],
+            ['자랑스러움', '지루함'],
+            ['희망', '난처함'],
           ],
         },
-        { id: 'cp_er_7', type: 'text', q: '단계적인 정서(예: 짜증→화남→격분)를 이해하거나 사용하는가?' },
-        { id: 'cp_er_8', type: 'text', q: '자신/타인의 정서에 대한 원인을 설명하거나 이해하는가?' },
+        { id: 'cpb_er_7', type: 'text', q: '다른 사람이 정서 조절과 관련해서 제공하는 피드백과 안내에 반응하는가? 만일 그렇다면, 어떻게 반응하는가?' },
         { id: 'cp_er_9', type: 'text', q: '아동이 집중하고, 흥미를 갖고, 진정하고, 참여를 유지하도록 돕기 위해 어떤 전략을 사용하는가?' },
-        { id: 'cp_er_10', type: 'text', q: '아동이 흥분하거나 화가 났다는 것을 어떻게 알 수 있는가?' },
-        { id: 'cp_er_11', type: 'text', q: '갈등이나 문제 해결 상황에서 어떻게 반응하는가? 타협하거나 협력할 수 있는가?' },
+        { id: 'cp_er_10', type: 'text', q: '아동이 흥분하거나 화가 났다는 것을 어떻게 알 수 있는가? 아동은 어떤 신호를 보이는가?' },
+        { id: 'cpb_er_10', type: 'text', q: '아동이 지루해하거나 흥미가 없다는 것을 어떻게 알 수 있는가? 아동은 어떤 신호를 보이는가?' },
         {
           id: 'cp_er_12', type: 'recoveryPair',
           q: '아동은 매우 심하게 화가 나거나 괴로울 때',
-          self: '어떻게 스스로 회복하는가?',
-          partner: '파트너가 어떻게 도움을 줄 때 회복되는가?',
+          self: '어떻게 스스로 회복하는가? 보통 회복되기까지 얼마나 오래 걸리는가?',
+          partner: '파트너가 어떻게 도와 줄 때 회복되는가? 보통 회복되기까지 얼마나 오래 걸리는가?',
         },
       ],
     },
@@ -2646,27 +2836,111 @@ const CP_INTERVIEW = {
         { id: 'cp_ts_1', type: 'text', q: '아동이 정기적으로(매일 또는 매주) 상호작용을 하거나 일상적으로 만나는 사람은 누구인가?' },
         { id: 'cp_ts_2', type: 'text', q: '아동이 정기적으로(매일 또는 매주) 가는 장소는 어디인가?' },
         {
-          id: 'cp_ts_3', type: 'scale02List',
-          q: '다음 중 쉽게 파악하거나 따르거나 반응할 수 있는 것 (0/1/2)',
+          id: 'cpb_ts_3', type: 'scale02List',
+          q: '다음 중 쉽게 파악하거나 따르거나 반응할 수 있는 것은 모두 다음의 숫자로 표시하시오: 거의 또는 전혀 파악할 수 없거나 반응할 수 없다면 0, 가끔씩 파악하거나 반응할 수 있다면 1, 대부분의 경우 파악하거나 반응할 수 있다면 2.',
           items: [
             '아동이 관심을 갖는 대상', '아동이 의사소통하려고 하는 것',
-            '아동의 감정 상태', '아동이 선호하는 속도',
+            '아동의 감정 상태', '아동이 선호하는 속도(빠름 또는 느림)',
             '아동에게 휴식이 필요할 때', '아동이 흥미를 보이는지 여부',
-            '아동이 좌절/흥분했는지 여부', '아동의 내적 사고/정신적 계획',
+            '아동이 좌절했는지 여부', '아동이 흥분했는지 여부',
           ],
         },
-        { id: 'cp_ts_4', type: 'text', q: '아동이 의사소통/대화를 시작하도록 격려하는 가장 도움이 되는 전략은?' },
-        { id: 'cp_ts_5', type: 'text', q: '문제행동을 보일 때 보통 어떻게 반응하는가?' },
-        { id: 'cp_ts_6', type: 'text', q: '아동의 주의를 끄는 데에 가장 도움이 되는 전략은?' },
-        { id: 'cp_ts_7', type: 'text', q: '아동과의 대화를 유지하는 데에 가장 도움이 되는 전략은?' },
-        { id: 'cp_ts_8', type: 'text', q: '아동에게 전달한 메시지를 이해했는지 확인하기 위해 주로 어떻게 의사소통하는가?' },
-        { id: 'cp_ts_9', type: 'text', q: '시각적 지원/조직화 지원을 사용하는가? 만일 그렇다면, 어떤 지원을 사용하는가?' },
+        { id: 'cp_ts_4', type: 'text', q: '아동이 대화를 시작하고 대화 중에 주제를 유지할 수 있도록 격려하는 데에 가장 도움이 되는 전략은 무엇인가(예: 선택할 기회 제공하기, 대화를 시작하도록 기다리고 격려하기, 아동의 주제 따르기, 정보 요구하기)?' },
+        { id: 'cp_ts_5', type: 'text', q: '아동이 스트레스가 매우 높은 상황에서 소리를 지르거나 달아나거나 쉴 새 없이 어떤 구절을 암송하는 등 문제행동을 보일 때 당신은 보통 어떻게 반응하는가? 그러한 반응이 효과적인가?' },
+        { id: 'cp_ts_6', type: 'text', q: '아동의 주의를 끄는 데에 가장 도움이 되는 전략은 무엇인가(예: 아동에게 가까이 다가가거나 멀리 떨어지기, 아동의 이름 부르기, 대화 중에 아동에게 동기 부여가 될 만한 주제 삽입하기)?' },
+        { id: 'cp_ts_7', type: 'text', q: '아동과의 상호작용을 유지하는 데에 가장 도움이 되는 전략은 무엇인가(예: 아동이 상호작용을 시작하게 하기, 아동이 휴식을 취한 후 계속하게 하기, 아동의 흥미를 따르기)?' },
+        { id: 'cp_ts_8', type: 'text', q: '아동에게 전달한 메시지를 이해했는지 확인하기 위해서 아동에게 주로 어떻게 의사소통을 하는가?' },
+        { id: 'cp_ts_9', type: 'text', q: '아동이 의사소통을 하고, 언어를 이해하고, 감정을 표현하고, 순조로운 일과를 진행하도록 도와주기 위해서 시각적 지원을 사용하는가? 만일 그렇다면, 어떤 지원을 사용하는가(예: 언어와 문자 단서를 함께 사용하기, 그림, 문자, 시간표, 달력 등을 이용하여 과제의 단계 보여 주기, 비디오 모델링 사용하기, 감정 일기 활용하기)?' },
         { id: 'cp_ts_10', type: 'text', q: '아동이 참여를 유지하는 데 도움이 되는 물리적 또는 사회적 환경 특성은 무엇인가(예: 아동이 상호작용하는 사람의 수 제한하기, 배경 소음 또는 시각적인 혼잡함 줄이기, 움직임이나 리듬을 위한 기회 더 많이 주기, 특정 활동을 위해 특정 장소를 일관성 있게 사용하기)?' },
-        { id: 'cp_ts_11', type: 'text', q: '아동이 의사소통/대화를 더 잘 하도록 돕는 환경 특성은 무엇인가?' },
-        { id: 'cp_ts_12', type: 'text', q: '또래와의 상호작용/우정 관계를 지원하기 위해 사용하는 전략은?' },
+        { id: 'cp_ts_11', type: 'text', q: '아동이 의사소통을 더 잘 하도록 돕는 물리적 또는 사회적 환경의 특성은 무엇인가(예: 집단 크기 줄이기, 아동이 좋아하는 주제나 활동으로 동기 부여하기, 사전에 사회적 활동 연습하기)?' },
       ],
     },
-    { ...SP_INTERVIEW.sections[3], questions: SP_INTERVIEW.sections[3].questions.map((q) => ({ ...q, id: q.id.replace('sp_', 'cp_') })) },
+    // ★ 추가 의견 — 대화 파트너 질문지(1권 462쪽)는 4번이 '아동에 대해 알아야 할…'('우리가' 없음)
+    { ...SP_INTERVIEW.sections[3], questions: SP_INTERVIEW.sections[3].questions.map((q) => ({ ...q, id: q.id.replace('sp_', 'cp_'), q: q.q.replace('아동에 대해 우리가 알아야 할', '아동에 대해 알아야 할') })) },
+  ],
+};
+
+// ★ 질문지를 책대로 바꾸면서 없어진 예전 질문 (이미 받은 답을 지우지 않고 '예전 질문지에 받은 답'으로 보여 주기 위해 남겨 둠)
+const RETIRED_INTERVIEW_QUESTIONS = {
+  conversation: [
+    { id: 'cp_sc_2', type: 'text', q: '상호작용 중 시선/얼굴표정/몸짓을 어떻게 사용하는지 기술하시오.', section: '사회 의사소통' },
+    {
+      id: 'cp_sc_3', type: 'checklist',
+      q: '다음 중 아동이 일관성 있게 사용하는 의사소통 기능을 모두 표시하시오.',
+      options: [
+        '원하는 것 요구하기', '도움 청하기', '거절/거부하기',
+        '인사하기', '허락 구하기', '경험 공유하기',
+        '관심 끌기', '정보 요구하기', '정보 제공하기',
+        '감정 표현하기', '의견 또는 생각 공유하기', '농담/유머 사용하기',
+      ],
+      section: '사회 의사소통',
+    },
+    {
+      id: 'cp_sc_4', type: 'checklist',
+      q: '다음 중 아동이 일관성 있게 사용하는 언어 형태를 모두 표시하시오.',
+      options: [
+        '단일 명사', '동사', '서술어/형용사', '대명사',
+        '시제(현재, 과거, 미래)', '단어 조합(2~3어 조합)',
+        '간단한 문장(주어+동사+목적어)', '복문(접속사 사용)',
+        '의문문', '부정문',
+      ],
+      withText: [
+        { id: 'time', label: '시간을 나타내는 단어(예: 전에, 지금, 나중에, 언제)' },
+        { id: 'place', label: '장소를 나타내는 단어' },
+        { id: 'attribute', label: '속성/수식 단어' },
+      ],
+      section: '사회 의사소통',
+    },
+    {
+      id: 'cp_sc_5', type: 'frequency',
+      q: '상호작용할 때 얼마나 자주 의사소통/대화를 시작하는가?',
+      partners: ['친숙한 성인과 함께', '친숙한 또래와 함께', '친숙하지 않은 사람과 함께', '소집단 내에서', '대집단 내에서'],
+      section: '사회 의사소통',
+    },
+    { id: 'cp_sc_6', type: 'text', q: '대화가 잘못되거나 의사소통이 실패할 때 아동은 어떻게 행동하는가? 명료화를 요구하는가?', section: '사회 의사소통' },
+    { id: 'cp_sc_7', type: 'text', q: '관심 있는 주제나 대화 시 주제를 어떻게 유지하는가? 한 주제에 머무는 시간은 얼마나 되는가?', section: '사회 의사소통' },
+    { id: 'cp_sc_8', type: 'text', q: '또래와의 우정 관계를 어떻게 맺고 유지하는가?', section: '사회 의사소통' },
+    { id: 'cp_sc_9', type: 'text', q: '유머, 농담, 비유 표현, 놀림 등을 이해하고 사용하는가?', section: '사회 의사소통' },
+    {
+      id: 'cp_sc_10', type: 'checklist',
+      q: '다음 중 일관성 있게 이해하는 의미나 비구어 단서에 모두 표시하시오.',
+      options: [
+        '얼굴 표정', '억양', '몸짓 단서',
+        '청자의 지식에 따른 정보 조절', '청자의 관심에 따른 주제 조절',
+        '대화 차례 주고받기 단서', '주제 전환 단서',
+        '관심 초점 변화 단서',
+        '유머/비유 표현의 비문자적 의미', '놀림/비꼬는 말의 비문자적 의미',
+      ],
+      section: '사회 의사소통',
+    },
+    {
+      id: 'cp_er_6',
+      type: 'emotionPairs',
+      q: '구어 또는 비구어 수단으로 긍정적인 감정과 부정적인 감정을 표현하는가? 만일 그렇다면, 어떻게 표현하는가?',
+      pairs: [
+        ['기쁨', '슬픔'],
+        ['만족감', '분노 또는 좌절'],
+        ['익살스러움', '두려움'],
+        ['자부심/성취감', '실망감/창피함'],
+        ['놀라움', '걱정/불안'],
+      ],
+      section: '정서 조절',
+    },
+    { id: 'cp_er_7', type: 'text', q: '단계적인 정서(예: 짜증→화남→격분)를 이해하거나 사용하는가?', section: '정서 조절' },
+    { id: 'cp_er_8', type: 'text', q: '자신/타인의 정서에 대한 원인을 설명하거나 이해하는가?', section: '정서 조절' },
+    { id: 'cp_er_11', type: 'text', q: '갈등이나 문제 해결 상황에서 어떻게 반응하는가? 타협하거나 협력할 수 있는가?', section: '정서 조절' },
+    {
+      id: 'cp_ts_3', type: 'scale02List',
+      q: '다음 중 쉽게 파악하거나 따르거나 반응할 수 있는 것 (0/1/2)',
+      items: [
+        '아동이 관심을 갖는 대상', '아동이 의사소통하려고 하는 것',
+        '아동의 감정 상태', '아동이 선호하는 속도',
+        '아동에게 휴식이 필요할 때', '아동이 흥미를 보이는지 여부',
+        '아동이 좌절/흥분했는지 여부', '아동의 내적 사고/정신적 계획',
+      ],
+      section: '교류 지원',
+    },
+    { id: 'cp_ts_12', type: 'text', q: '또래와의 상호작용/우정 관계를 지원하기 위해 사용하는 전략은?', section: '교류 지원' },
   ],
 };
 
@@ -2699,6 +2973,12 @@ function buildParentQuestionnaireHTML(stage, childName, answers) {
         options: q.options || null,
         withText: q.withText || null,
         partners: q.partners || null,
+        // ★ 칸이 여러 개인 문항(감정별·회복·0/1/2)도 선생님 화면과 같은 모양으로 받기 위한 정보
+        emotions: q.emotions || null,
+        pairs: q.pairs || null,
+        self: q.self || null,
+        partner: q.partner || null,
+        items: q.items || null,
       })),
     })),
   }).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
@@ -2809,6 +3089,45 @@ function buildParentQuestionnaireHTML(stage, childName, answers) {
         });
         tbl.innerHTML='<thead>'+thead+'</thead><tbody>'+body+'</tbody>';
         box.appendChild(tbl);
+      } else if (q.type === 'emotionsRows' || q.type === 'emotionPairs' || q.type === 'recoveryPair') {
+        // 칸 여러 개 (감정별 / 스스로·파트너)
+        var fields = [];
+        if (q.type === 'emotionsRows') (q.emotions||[]).forEach(function(e){ fields.push([e, e]); });
+        else if (q.type === 'emotionPairs') (q.pairs||[]).forEach(function(pr){ pr.forEach(function(e){ fields.push([e, e]); }); });
+        else { fields.push(['self', '• ' + (q.self||'')]); fields.push(['partner', '• ' + (q.partner||'')]); }
+        var prevObj = (ans[q.id] && typeof ans[q.id]==='object') ? ans[q.id] : {};
+        var oldTxt = (typeof ans[q.id]==='string') ? ans[q.id] : (prevObj.__old || '');
+        if (oldTxt && String(oldTxt).trim()) {
+          var on=document.createElement('div'); on.style.cssText='font-size:12.5px;color:#6b5320;background:#fef7e6;border:1px dashed #c19a3a;border-radius:6px;padding:7px 10px;margin-bottom:8px;white-space:pre-wrap;';
+          on.textContent='이전에 적어 주신 답: ' + oldTxt; box.appendChild(on);
+        }
+        fields.forEach(function(f){
+          var lb=document.createElement('div'); lb.style.cssText='font-size:13.5px;font-weight:600;margin:6px 0 4px;'; lb.textContent=f[1]; box.appendChild(lb);
+          var t=document.createElement('textarea'); t.dataset.qid=q.id; t.dataset.key=f[0]; t.placeholder='여기에 답변을 입력하세요';
+          if (prevObj[f[0]]) t.value=prevObj[f[0]];
+          box.appendChild(t);
+        });
+      } else if (q.type === 'scale02List') {
+        // 항목별 0/1/2
+        var prevS = (ans[q.id] && typeof ans[q.id]==='object') ? ans[q.id] : {};
+        var oldS = (typeof ans[q.id]==='string') ? ans[q.id] : (prevS.__old || '');
+        if (oldS && String(oldS).trim()) {
+          var on2=document.createElement('div'); on2.style.cssText='font-size:12.5px;color:#6b5320;background:#fef7e6;border:1px dashed #c19a3a;border-radius:6px;padding:7px 10px;margin-bottom:8px;white-space:pre-wrap;';
+          on2.textContent='이전에 적어 주신 답: ' + oldS; box.appendChild(on2);
+        }
+        var st=document.createElement('table'); st.className='freq';
+        var sh='<tr><th></th><th>거의/전혀 (0)</th><th>가끔 (1)</th><th>대부분 (2)</th></tr>';
+        var sb='';
+        (q.items||[]).forEach(function(it, ri){
+          sb+='<tr><td>'+escapeHtml(it)+'</td>';
+          [0,1,2].forEach(function(n){
+            var ck=(prevS[it]===n)?'checked':'';
+            sb+='<td><input type="radio" name="'+q.id+'_s'+ri+'" data-qid="'+q.id+'" data-key="'+escapeHtml(it).replace(/"/g,'&quot;')+'" data-val="'+n+'" '+ck+'></td>';
+          });
+          sb+='</tr>';
+        });
+        st.innerHTML='<thead>'+sh+'</thead><tbody>'+sb+'</tbody>';
+        box.appendChild(st);
       } else {
         // text 및 기타 모든 타입 → 자유 서술 textarea
         var ta=document.createElement('textarea'); ta.dataset.qid=q.id; ta.placeholder='여기에 답변을 입력하세요';
@@ -2825,8 +3144,15 @@ function buildParentQuestionnaireHTML(stage, childName, answers) {
     var out={};
     out.__writer=document.getElementById('writerName').value||'';
     // textarea (text 등)
-    form.querySelectorAll('textarea[data-qid]').forEach(function(ta){
+    form.querySelectorAll('textarea[data-qid]:not([data-key])').forEach(function(ta){
       if (ta.value.trim()) out[ta.dataset.qid]=ta.value;
+    });
+    // 칸 여러 개 문항 → {칸이름: 답}
+    form.querySelectorAll('textarea[data-key]').forEach(function(ta){
+      if (ta.value.trim()){ var id=ta.dataset.qid; out[id]=out[id]||{}; out[id][ta.dataset.key]=ta.value; }
+    });
+    form.querySelectorAll('input[type=radio][data-key]:checked').forEach(function(r){
+      var id=r.dataset.qid; out[id]=out[id]||{}; out[id][r.dataset.key]=parseInt(r.dataset.val,10);
     });
     // checklist
     form.querySelectorAll('input[type=checkbox][data-qid]').forEach(function(cb){
@@ -2836,7 +3162,7 @@ function buildParentQuestionnaireHTML(stage, childName, answers) {
       if (ex.value.trim()){ var id=ex.dataset.qid; out[id]=out[id]||{checked:{},texts:{}}; out[id].texts[ex.dataset.txt]=ex.value; }
     });
     // frequency
-    form.querySelectorAll('input[type=radio][data-qid]:checked').forEach(function(r){
+    form.querySelectorAll('input[type=radio][data-row]:checked').forEach(function(r){
       var id=r.dataset.qid; out[id]=out[id]||{}; out[id][r.dataset.row]=parseInt(r.dataset.col,10);
     });
     return out;
@@ -3175,24 +3501,73 @@ const LS_BACKUPS = 'scerts_backups_v1';  // 회전 백업 슬롯
 const LS_TEMPLATES = 'scerts_templates_v1';  // 회기 템플릿 (전역, 모든 아동 공유)
 const MAX_BACKUPS = 10;
 
+// ★ 이 기기 저장칸을 계정별로 나눔 — 한 컴퓨터를 여러 선생님이 써도 앞사람 자료가 섞이지 않게
+let _lsUser = '';
+const lsKey = (base) => (_lsUser ? `${base}::${_lsUser}` : base);
+// 예전 공용 칸 → 지금 계정 칸으로 복사 (계정 칸이 비어 있을 때 한 번만)
+function migrateSharedLocal() {
+  try {
+    // 계정마다 한 번만 (매번 하면 지운 템플릿이 되살아남)
+    const doneKey = lsKey('scerts_shared_migrated');
+    if (localStorage.getItem(doneKey)) return;
+    [LS_STATE, LS_ARCHIVE, LS_BACKUPS].forEach((base) => {
+      if (localStorage.getItem(lsKey(base)) == null) {
+        const old = localStorage.getItem(base);
+        if (old != null) localStorage.setItem(lsKey(base), old);
+      }
+    });
+    // 템플릿은 계정 칸에 이미 뭔가 있어도(먼저 서버와 맞춘 경우) 예전 것을 합쳐 넣는다
+    const oldT = JSON.parse(localStorage.getItem(LS_TEMPLATES) || '[]');
+    if (Array.isArray(oldT) && oldT.length > 0) {
+      const curT = JSON.parse(localStorage.getItem(lsKey(LS_TEMPLATES)) || '[]');
+      const byId = new Map();
+      [...(Array.isArray(curT) ? curT : []), ...oldT].forEach((t) => { if (t && t.id && !byId.has(t.id)) byId.set(t.id, t); });
+      localStorage.setItem(lsKey(LS_TEMPLATES), JSON.stringify([...byId.values()]));
+    }
+    localStorage.setItem(doneKey, '1');
+  } catch (e) {}
+}
+
 // 회기 템플릿 로드/저장
 function loadTemplates() {
   try {
-    const raw = localStorage.getItem(LS_TEMPLATES);
+    const raw = localStorage.getItem(lsKey(LS_TEMPLATES));
     return raw ? JSON.parse(raw) : [];
   } catch (e) { return []; }
 }
 function saveTemplates(list) {
   try {
-    localStorage.setItem(LS_TEMPLATES, JSON.stringify(list));
+    localStorage.setItem(lsKey(LS_TEMPLATES), JSON.stringify(list));
   } catch (e) {}
+  // ★ 서버에도 저장 → 다른 기기(아이폰·컴퓨터)에서도 같은 템플릿이 보이게
+  try { if (window.storage) window.storage.set('gd-aba-templates', JSON.stringify(list)).catch(() => {}); } catch (e) {}
+}
+// 지운 템플릿 기록 (기기 사이에 합칠 때 되살아나지 않게)
+function loadDeletedTemplateIds() {
+  try { const v = JSON.parse(localStorage.getItem(lsKey(LS_TEMPLATES + '_deleted')) || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+function saveDeletedTemplateIds(ids) {
+  try { localStorage.setItem(lsKey(LS_TEMPLATES + '_deleted'), JSON.stringify(ids)); } catch (e) {}
+  try { if (window.storage) window.storage.set('gd-aba-templates-deleted', JSON.stringify(ids)).catch(() => {}); } catch (e) {}
+}
+async function markTemplateDeleted(id) {
+  // 서버에 있는 '지운 목록'과 합친 뒤 저장 (다른 기기에서 지운 기록을 덮어쓰지 않게). 최근 500개까지만 보관
+  let server = [];
+  try {
+    if (window.storage) {
+      const r = await window.storage.get('gd-aba-templates-deleted', true);
+      if (r && !r.error && r.value) { const v = JSON.parse(r.value); if (Array.isArray(v)) server = v; }
+    }
+  } catch (e) {}
+  const all = [...new Set([...server, ...loadDeletedTemplateIds(), id])];
+  saveDeletedTemplateIds(all.slice(-500));
 }
 const BACKUP_INTERVAL_MS = 5 * 60 * 1000;  // 5분 이상 간격으로만 백업
 
 // 회전 백업 저장 (마지막 백업 후 5분 지난 경우만)
 function saveBackup(state) {
   try {
-    const raw = localStorage.getItem(LS_BACKUPS);
+    const raw = localStorage.getItem(lsKey(LS_BACKUPS));
     const list = raw ? JSON.parse(raw) : [];
     const now = Date.now();
     // 마지막 백업이 너무 최근이면 스킵
@@ -3208,13 +3583,13 @@ function saveBackup(state) {
     };
     list.unshift(backup);
     while (list.length > MAX_BACKUPS) list.pop();
-    localStorage.setItem(LS_BACKUPS, JSON.stringify(list));
+    localStorage.setItem(lsKey(LS_BACKUPS), JSON.stringify(list));
   } catch (e) {}
 }
 
 function loadBackups() {
   try {
-    const raw = localStorage.getItem(LS_BACKUPS);
+    const raw = localStorage.getItem(lsKey(LS_BACKUPS));
     return raw ? JSON.parse(raw) : [];
   } catch (e) {
     return [];
@@ -3223,10 +3598,10 @@ function loadBackups() {
 
 function removeBackup(id) {
   try {
-    const raw = localStorage.getItem(LS_BACKUPS);
+    const raw = localStorage.getItem(lsKey(LS_BACKUPS));
     if (!raw) return;
     const list = JSON.parse(raw).filter((b) => b.id !== id);
-    localStorage.setItem(LS_BACKUPS, JSON.stringify(list));
+    localStorage.setItem(lsKey(LS_BACKUPS), JSON.stringify(list));
   } catch (e) {}
 }
 
@@ -3259,7 +3634,7 @@ const blankChild = (name = '') => {
       childName: name,
       birthDate: '',
       className: 'SCERTS 프로그램',
-      therapist: '민 다 혜',
+      therapist: '',  // ★ 새로 추가할 때 로그인한 선생님 이름으로 채움 (addChild 참고)
       startDate: '',
       reportDate: new Date().toISOString().slice(0, 10),
       stage: null,
@@ -3421,6 +3796,7 @@ function makeSampleChild() {
   c.meta.startDate = '2026-01-10';
   c.meta.stage = 'language';
   c.meta.className = 'SCERTS 프로그램 햇살반';
+  c.meta.therapist = '민 다 혜';
 
   // 1) 단계 결정 (언어 파트너로 귀결되는 응답)
   c.decision = {
@@ -3441,7 +3817,8 @@ function makeSampleChild() {
     lp_sc_7: '요구를 알아채지 못하면 같은 단어를 더 크게 반복하거나, 손을 잡아끌어 원하는 것으로 데려갑니다.',
     lp_sc_8: '블록과 자동차를 가장 좋아합니다. 블록은 높이 쌓았다가 무너뜨리기를 반복하고, 자동차는 일렬로 줄 세우기를 즐깁니다.',
     lp_sc_9: '친숙한 어른이 끼어들면 잘 받아들이고 함께 놀지만, 또래가 끼어들면 처음엔 경계하다가 점차 곁을 내어줍니다.',
-    lp_sc_10: { checked: { '가리키기': true, '얼굴 표정': true, '아동의 이름': true, '한 단어로 된 지시': true, '두 단어 이상의 지시': true }, texts: { verb: '"빨리", "크게" 등 익숙한 수식어는 이해함', phrase: '"신발 신고 나가자" 같은 익숙한 구는 이해함' } },
+    lp_sc_imit: { 0: 2, 1: 1, 2: 1 },
+    lp_sc_10: { checked: { '가리키기': true, '얼굴 표정': true, '아동의 이름': true, familiar: true, verb: true }, texts: { familiar: '"신발 신고 나가자" 같은 익숙한 구는 이해함', verb: '"빨리", "크게" 등 익숙한 수식어는 이해함' } },
     // ── 정서 조절 ──
     lp_er_1: '관심 있는 사물에는 적극적으로 다가가 탐색하고, 사람에 대해서는 친숙도에 따라 반응 차이가 큽니다.',
     lp_er_2: '블록 쌓기, 자동차 놀이, 그림책 보기',
@@ -3675,9 +4052,9 @@ function makeSampleChild() {
   // 6) IEP — 현행수준·목표·주간목표 미리 채움 (불러오면 STEP4 완료로 표시)
   c.iep.reportDate = '2026-02-10';  // IEP 작성일 (홈 작성일과 다르게)
   c.iep.currentLevel = {
-    sc: '준호는 사회 의사소통 영역 진단에서 21/40점(53%)을 받았다. 보호자 보고에 따르면 눈맞춤은 잘하고 원하는 것을 단어로 표현하지만, 먼저 대화를 시작하는 일은 드뭅니다. 언어 파트너 단계 수준에서 공동관심은 55%, 상징 사용은 50%로 나타났다. 점수가 낮은 항목을 IEP 목표로 선정하였다.',
-    er: '준호는 정서 조절 영역 진단에서 14/40점(35%)을 받았다. 상호조절 44%, 자기조절 32%로, "파트너 의존형" 패턴에 해당한다. 준호가 다른 사람의 도움으로는 정서를 잘 조절하지만, 혼자서는 조절 전략을 사용하기 어려운 상태다. 흥미를 보이는 활동은 블록 쌓기, 자동차 놀이, 그림책 보기이며, 어려움을 보이는 상황은 놀이를 끝내고 다른 활동으로 바꿀 때, 시끄럽고 사람이 많은 환경이다.',
-    ts: '준호는 교류 지원 영역 진단에서 양호한 수준을 보인다. 파트너의 반응성과 시각 지원 사용에서 강점이 있으며, 시작행동 촉진과 또래 상호작용 지원이 교실과 가정 간 일관성 확보의 우선 과제이다.',
+    sc: '준호는 언어 파트너 단계 수준에서 공동관심 55%, 상징 사용 50%로 나타났다. 보호자 보고에 따르면 눈맞춤은 잘하고 원하는 것을 단어로 표현하지만, 먼저 대화를 시작하는 일은 드뭅니다. 점수가 낮은 항목을 IEP 목표로 선정하였다.',
+    er: '준호는 정서 조절 영역에서 상호조절 44%, 자기조절 32%로, "조절 토대 형성 필요" 패턴에 해당한다. 상호조절과 자기조절 모두 절반 미만으로 상대적 요구에 해당한다. 두 능력은 발달 내내 서로 의존하므로 함께 지원한다. 흥미를 보이는 활동은 블록 쌓기, 자동차 놀이, 그림책 보기이며, 어려움을 보이는 상황은 놀이를 끝내고 다른 활동으로 바꿀 때, 시끄럽고 사람이 많은 환경이다.',
+    ts: '파트너의 교류 지원은 양호한 수준이다. 파트너의 반응성과 시각 지원 사용에서 강점이 있으며, 시작행동 촉진과 또래 상호작용 지원이 교실과 가정 간 일관성 확보의 우선 과제이다.',
   };
   c.iep.annualGoals = {
     sc: '준호는 일상적인 놀이 및 과제 상황에서 기능적인 의사소통 수단을 사용하여 관계어·서술어 확장을 목표로 한다. (가족 희망: 친구들과 어울려 놀고, 자기 기분을 말로 표현하기)',
@@ -3710,9 +4087,9 @@ function makeSampleChild() {
   c.interim.reportType = 'interim';
   c.interim.reportDate = '2026-05-20';  // 중간보고서 작성일 (IEP·홈과 다르게)
   c.interim.period = '2026년 1월 ~ 5월 (1차 중재 기간)';
-  c.interim.summary = '준호는 언어 파트너 단계(상징적 의사소통의 확장) 수준에 해당한다. 이번 평가 기간 동안 SCERTS 세 영역(사회 의사소통, 정서 조절, 교류 지원)을 중심으로 중재를 진행하였다. 진단 총점은 사전 25점에서 사후 36점으로 11점 상승하였다. 이 단계의 핵심 발달 과제는 단일 단어에서 2~3어 조합으로 확장, 다양한 의사소통 기능 출현이며, 해당 과제를 중심으로 지원하였다.';
+  c.interim.summary = '준호는 언어 파트너 단계(상징적 의사소통의 확장) 수준에 해당한다. 이번 평가 기간 동안 SCERTS 세 영역(사회 의사소통, 정서 조절, 교류 지원)을 중심으로 중재를 진행하였다. 사전·사후 진단 점수 변화는 구성 요소별로 SAP 요약지에 정리하였다. 이 단계의 핵심 발달 과제는 단일 단어에서 2~3어 조합으로 확장, 다양한 의사소통 기능 출현이며, 해당 과제를 중심으로 지원하였다.';
   c.interim.observations = '회기별 활동 일지 3건 중 주요 관찰 사례는 다음과 같다.\n\n▸ 2026-03-12 - 블록 쌓기 놀이\n  · 블록을 가리키며 "더 줘"라고 요청 (독립 수행)\n  메모: 활동 시작 시 집중도가 높았고 차례 주고받기 3회 성공\n\n▸ 2026-03-19 - 그림책 함께 보기\n  · 그림을 보고 "강아지", "공"이라고 명명 (부분 보조)\n\n▸ 2026-03-26 - 자동차 역할놀이\n  · 자동차를 뺏기자 화났지만 교사가 감정을 말로 짚어주자 진정 (파트너 도움)';
-  c.interim.direction = '정서 조절 영역의 현재 프로파일은 상호조절 44%, 자기조절 32%로 "파트너 의존형" 패턴에 해당한다.\n\n준호가 다른 사람의 도움으로는 정서를 잘 조절하지만, 혼자서는 조절 전략을 사용하기 어려운 상태다.\n\n다음 기간에는 다음 전략을 중점적으로 적용한다.\n1. 파트너가 사용하던 진정 전략을 준호 스스로 따라 할 수 있도록 시범 보이기\n2. 감정 단어(화남, 속상함, 좋아)를 일상에서 반복 노출\n3. 전환 상황에 시각적 일정표를 일관되게 사용';
+  c.interim.direction = '정서 조절 영역의 현재 프로파일은 상호조절 44%, 자기조절 32%로 "조절 토대 형성 필요" 패턴에 해당한다.\n\n상호조절과 자기조절 모두 절반 미만으로 상대적 요구에 해당한다. 두 능력은 발달 내내 서로 의존하므로 함께 지원한다.\n\n다음 기간에는 다음 전략을 중점적으로 적용한다.\n1. 파트너의 반응성·예측가능성 확보 (IS1 영역 강조)\n2. 준호가 좋아하는 감각 자극이나 활동으로 진정·각성 조절 시범\n3. 간단한 신호(예: 그림 카드)로 도움 요청을 가르치기\n4. 파트너 지원과 함께 준호가 혼자서 할 수 있는 자기조절 행동 전략도 연습';
 
   return c;
 }
@@ -3726,6 +4103,7 @@ function makeSampleChildSP() {
   c.meta.startDate = '2026-02-01';
   c.meta.stage = 'social';
   c.meta.className = 'SCERTS 프로그램 새싹반';
+  c.meta.therapist = '민 다 혜';
 
   c.decision = { q1: { a1: false, a2: false }, q2: { b1: true, b2: false } };
 
@@ -3818,7 +4196,7 @@ function makeSampleChildSP() {
   c.iep.currentLevel = {
     sc: '서아는 사회 의사소통 영역에서 사회적 파트너 단계 초기 수준이다. 보호자 보고에 따르면 아직 단어는 거의 사용하지 않으며 손 끌기와 발성으로 의사를 보인다. 공동관심은 발달 중이며, 가리키기와 시선 맞추기가 일관되지 않다.',
     er: '서아는 정서 조절 영역에서 파트너 의존이 높은 양상이다. 낯선 자극에 위축되며 엄마의 도움으로 진정한다. 흥미를 보이는 활동은 비눗방울·음악·까꿍 놀이이며, 어려움을 보이는 상황은 낯선 사람·큰 소음·옷 갈아입기이다.',
-    ts: '서아는 친숙한 파트너와의 상호작용에서 강점을 보인다. 파트너의 반응성·기다림·시각 지원 사용에서 일관성을 높이는 것이 우선 과제이다.',
+    ts: '친숙한 파트너가 서아의 신호에 잘 반응하는 것이 교류 지원의 강점이다. 파트너의 반응성·기다림·시각 지원 사용에서 일관성을 높이는 것이 우선 과제이다.',
   };
   c.iep.annualGoals = {
     sc: '서아는 일상 활동에서 의도적 의사소통(가리키기·발성·시선)을 사용하여 요구·거부·관심 공유를 표현한다.',
@@ -3850,7 +4228,7 @@ function makeSampleChildSP() {
   c.interim.reportType = 'interim';
   c.interim.reportDate = '2026-06-10';
   c.interim.period = '2026년 2월 ~ 6월 (1차 중재 기간)';
-  c.interim.summary = '서아는 사회적 파트너 단계(전 상징적 의사소통)에 해당한다. 이번 평가 기간 동안 의도적 의사소통 시도가 늘었으며, 발성과 가리키기 사용 빈도가 증가하였다. 진단 총점은 사전에서 사후로 향상되었다.';
+  c.interim.summary = '서아는 사회적 파트너 단계(전 상징적 의사소통)에 해당한다. 이번 평가 기간 동안 의도적 의사소통 시도가 늘었으며, 발성과 가리키기 사용 빈도가 증가하였다. 사전·사후 진단 점수 변화는 구성 요소별로 SAP 요약지에 정리하였다.';
   c.interim.observations = '관찰 사례:\n▸ 2026-03-05 비눗방울 놀이 — 비눗방울을 더 원할 때 엄마와 눈맞춤 3회 (부분 보조)\n▸ 2026-03-12 까꿍 놀이 — "까꿍" 발성에 미소로 반응 (독립 수행), 멈춤 시 발성으로 요청 (언어 촉진)';
   c.interim.direction = '정서 조절 영역에서 파트너 의존이 높은 양상이다. 서아가 다른 사람의 도움으로는 정서를 조절하지만 혼자서 조절 전략을 사용하기 어렵다.\n\n다음 기간 전략:\n1. 파트너의 진정 시범을 서아가 모방하도록 단계적 시범\n2. 좋아하는 사물·노래를 진정 도구로 일관되게 제공\n3. 가정·치료실에서 동일한 사물 일정표 사용';
 
@@ -4010,36 +4388,37 @@ function makeSampleChildCP() {
   c.meta.startDate = '2026-01-15';
   c.meta.stage = 'conversation';
   c.meta.className = 'SCERTS 프로그램 푸른반';
+  c.meta.therapist = '민 다 혜';
 
   c.decision = { q1: { a1: true, a2: true, a3: true }, q2: { b1: true, b2: true, b3: true } };
 
   c.interview.meta = { name: '이지훈', age: '만 6세 3개월', date: '2026-01-17', reporter: '최수정', relation: '어머니' };
   c.interview.answers = {
     cp_sc_1: '문장으로 자기 생각을 표현할 수 있으나, 대화 주제를 유지하거나 상대 의도를 파악하는 데 어려움이 있습니다.',
-    cp_sc_2: '관심 있는 주제(공룡, 지하철 노선)에 대해서는 길게 말하지만, 듣는 사람의 반응을 잘 살피지 못합니다.',
-    cp_sc_3: { checked: { '문장 사용': true, '질문하기': true, '경험 이야기하기': true }, texts: {} },
-    cp_sc_4: '"왜?", "어디?", "뭐 해?" 등 질문을 자주 사용하고, 자신의 경험을 시간 순서로 이야기할 수 있습니다.',
-    cp_sc_5: { checked: { '정보 요구': true, '경험 공유': true, '의견 말하기': true, '협상하기': true }, texts: {} },
-    cp_sc_6: { 0: 2, 1: 2, 2: 1 },
-    cp_sc_7: '관심 있는 주제로 돌아가거나, 말이 통하지 않으면 짜증을 냅니다.',
-    cp_sc_8: '공룡 책 읽기, 지하철 노선도 보기, 블록으로 건물 만들기.',
-    cp_sc_9: '친숙한 어른과는 대화를 잘 이어가지만, 또래와는 자기 주제만 고집해 갈등이 생깁니다.',
-    cp_sc_10: { checked: { '간접 표현': true, '암시': true, '농담': true }, texts: { detail: '농담의 의도는 이해하지 못하고 글자 그대로 받아들임' } },
+    // ★ 책(1권 부록) 대화 파트너 질문지 문항에 맞춘 견본 답
+    cpb_sc_2: { checked: { '원하는 물건을 요구하거나 도움 청하기': true, '현재와 과거의 사건에 대해 이야기하기': true, '현재와 과거의 사건에 대해 정보 요구하기': true, '감정과 의견 표현하기': true }, texts: {} },
+    cpb_sc_3: '관심 있는 주제로 돌아가거나, 말이 통하지 않으면 짜증을 냅니다.',
+    cpb_sc_4: { checked: { '의문사(예: 무엇, 어디, 누구)': true, '시간을 나타내는 단어(예: 전에, 지금, 나중에, 언제)': true, '동사(예: 과거형, 현재형, 미래형 시제[먹었다, 달렸다, 갈 거야])': true, '등위접속사(예: 그리고, 또는)': true }, texts: {} },
+    cpb_sc_5: { checked: { '자주 주제를 시작한다': true, '관련된 정보를 요구한다': true }, texts: {} },
+    cpb_sc_6: { checked: { '얼굴 표정': true, '몸짓': true }, texts: {} },
+    cpb_sc_7: '공룡 책 읽기, 지하철 노선도 보기, 블록으로 건물 만들기.',
+    cpb_sc_8: '같은 반 친구 2명. 공룡 이야기를 하거나 블록 놀이를 함께 하고 싶어 합니다.',
+    cpb_sc_9: { 0: 2, 1: 2, 2: 1 },
+    cpb_sc_10: { checked: { '감정에 대한 비구어 단서': true }, texts: {} },
     cp_er_1: '관심사에는 적극적이나, 예상과 다른 상황에서 강한 정서 변화를 보입니다.',
     cp_er_2: '공룡 박물관 가기, 지하철 타기, 블록 건축',
     cp_er_3: '계획 변경, 친구와의 의견 충돌, 시끄러운 환경',
     cp_er_4: '"5분 더 하고 끝내자"고 미리 약속하면 협상이 가능합니다.',
     cp_er_5: '심호흡을 시범 보이면 따라 합니다. 자기 자리로 가서 책을 보며 진정합니다.',
-    cp_er_6: { '기쁨': '뛰며 큰 소리로 좋아한다고 말함', '슬픔': '"속상해"라고 말하며 풀이 죽음', '만족감': '"좋아"라고 말하며 미소', '분노 또는 좌절': '"싫어!"라고 외치고 발을 구름', '익살스러움': '농담을 시도하지만 또래가 이해 못해 좌절', '두려움': '"안 할래"라고 말하며 회피' },
-    cp_er_7: '위로의 말에 반응하나, 감정이 진정되기까지 시간이 좀 걸립니다.',
-    cp_er_8: '"A 할까 B 할까?"에 명확히 선택을 말로 표현합니다.',
+    cpb_er_6: { '기쁨': '뛰며 큰 소리로 좋아한다고 말함', '슬픔': '"속상해"라고 말하며 풀이 죽음', '만족감': '"좋아"라고 말하며 미소', '분노 또는 좌절': '"싫어!"라고 외치고 발을 구름', '익살스러움': '농담을 시도하지만 또래가 이해 못해 좌절', '두려움': '"안 할래"라고 말하며 회피' },
+    cpb_er_7: '안내해 주면 받아들이지만, 감정이 진정되기까지 시간이 좀 걸립니다.',
     cp_er_9: '심호흡, 좋아하는 책 보기, 혼잣말로 상황 정리하기.',
     cp_er_10: '얼굴이 빨개지고 목소리가 커지며 같은 말을 반복합니다.',
-    cp_er_11: '주제 전환, 농담 시도, 회피 행동.',
+    cpb_er_10: '대답이 짧아지고 주제를 바꾸거나 자리를 뜨려 합니다.',
     cp_er_12: { self: '자기 자리로 가서 책을 보거나 혼잣말로 상황을 정리함', partner: '감정을 짚어주고 대안을 함께 찾으면 회복됨' },
     cp_ts_1: '엄마, 아빠, 누나, 담임 선생님, 친구 2명',
     cp_ts_2: '집, 학교, 공룡 박물관, 지하철역',
-    cp_ts_3: { '아동이 관심을 갖는 대상': 2, '아동이 의사소통하려고 하는 것': 2, '아동의 감정 상태': 1, '아동이 선호하는 속도': 2, '아동에게 휴식이 필요할 때': 1, '아동이 흥미를 보이는지 여부': 2, '아동이 좌절했는지 여부': 1, '아동이 흥분했는지 여부': 1 },
+    cpb_ts_3: { '아동이 관심을 갖는 대상': 2, '아동이 의사소통하려고 하는 것': 2, '아동의 감정 상태': 1, '아동이 선호하는 속도(빠름 또는 느림)': 2, '아동에게 휴식이 필요할 때': 1, '아동이 흥미를 보이는지 여부': 2, '아동이 좌절했는지 여부': 1, '아동이 흥분했는지 여부': 1 },
     cp_ts_4: '관심 주제로 대화를 시작해 점차 새 주제로 확장합니다.',
     cp_ts_5: '감정을 언어로 짚어주고 대안을 함께 찾습니다.',
     cp_ts_6: '눈높이에서 이름을 부르고 짧고 명확하게 요점을 전달합니다.',
@@ -4048,19 +4427,18 @@ function makeSampleChildCP() {
     cp_ts_9: '주간 일정표와 활동 순서표를 사용합니다.',
     cp_ts_10: '구조화된 환경, 예측 가능한 일정, 익숙한 또래가 있을 때 잘 참여합니다.',
     cp_ts_11: '시각 자료가 함께 제시되고 한 번에 한 가지 활동이 주어질 때 효과적입니다.',
-    cp_ts_12: '또래 간 갈등 시 중재자가 감정을 짚어주고 협상을 도와줍니다.',
   };
 
   // CP 단계 진단 점수 (전반적으로 높음 — 대화 가능 단계)
   const preScores = {
-    'JA1.1':2,'JA2.1':2,'JA3.1':1,'JA4.1':2,'JA5.1':2,'JA6.1':1,'JA7.1':1,'JA8.1':1,
+    'JA1.1':2,'JA2.1':2,'JA3.1':1,'JA4.1':2,'JA5.1':2,'JA4.2':1,'JA5.2':1,'JA4.8':1,
     'SU1.1':2,'SU2.1':2,'SU3.1':2,'SU4.1':1,'SU5.1':2,'SU5.2':1,'SU6.1':1,
     'MR1.1':2,'MR2.1':1,'MR2.3':2,'MR3.1':1,
     'SR1.1':2,'SR2.1':1,'SR3.1':1,'SR4.1':1,
     'IS1.1':2,'IS2.1':2,'IS6.1':1,'LS1.1':2,'LS2.1':1,'LS3.1':1,
   };
   const postScores = {
-    'JA1.1':2,'JA2.1':2,'JA3.1':2,'JA4.1':2,'JA5.1':2,'JA6.1':2,'JA7.1':2,'JA8.1':2,
+    'JA1.1':2,'JA2.1':2,'JA3.1':2,'JA4.1':2,'JA5.1':2,'JA4.2':2,'JA5.2':2,'JA4.8':2,
     'SU1.1':2,'SU2.1':2,'SU3.1':2,'SU4.1':2,'SU5.1':2,'SU5.2':2,'SU6.1':2,
     'MR1.1':2,'MR2.1':2,'MR2.3':2,'MR3.1':2,
     'SR1.1':2,'SR2.1':2,'SR3.1':2,'SR4.1':1,
@@ -4097,7 +4475,7 @@ function makeSampleChildCP() {
   c.iep.currentLevel = {
     sc: '지훈이는 사회 의사소통 영역에서 대화 파트너 단계 중간 수준이다. 문장으로 자기 생각을 표현할 수 있으나, 보호자 보고에 따르면 대화 주제를 유지하거나 상대 의도를 파악하는 데 어려움이 있다.',
     er: '지훈이는 정서 조절 영역에서 자기조절 전략(심호흡, 혼잣말, 책 보기)을 사용할 수 있으나, 예상과 다른 상황(계획 변경, 의견 충돌)에서 강한 정서 변화를 보인다.',
-    ts: '지훈이는 구조화된 환경과 예측 가능한 일정에서 강점을 보인다. 또래 매개 전략과 갈등 중재 지원이 우선 과제이다.',
+    ts: '구조화된 환경과 예측 가능한 일정 제공이 교류 지원의 강점이다. 또래 매개 전략과 갈등 중재 지원이 우선 과제이다.',
   };
   c.iep.annualGoals = {
     sc: '지훈이는 또래와의 대화에서 주제 유지·차례 주고받기·관점 수용을 통해 협력적 상호작용을 한다. (가족 희망: 학교에서 친구와 안정적으로 놀기)',
@@ -4120,8 +4498,8 @@ function makeSampleChildCP() {
     ts: '갈등 해결 단계 카드 사용 효과 주 1회 점검.',
   };
   c.iep.selectedGoals = [
-    { id: 'JA7.1', label: '또래와 대화 차례 주고받기', domain: 'joinAttention', customGoal: '' },
-    { id: 'JA8.1', label: '관점 수용 및 협력', domain: 'joinAttention', customGoal: '' },
+    { id: 'JA4.1', label: '청자/화자 역할 바꾸며 상호작용하기', domain: 'joinAttention', customGoal: '' },
+    { id: 'JA4.3', label: '파트너 관심에 맞게 대화 시작/유지하기', domain: 'joinAttention', customGoal: '' },
     { id: 'SR3.1', label: '자기조절 전략 자발적 사용', domain: 'selfReg', customGoal: '' },
     { id: 'SR4.1', label: '예상치 못한 상황 대처', domain: 'selfReg', customGoal: '' },
   ];
@@ -4333,7 +4711,7 @@ function migrateLegacyWs(legacyWs) {
 // 신규 상태 로드: legacy 단일 워크스페이스 또는 신규 다중 아동 구조
 function loadState() {
   try {
-    const raw = localStorage.getItem(LS_STATE);
+    const raw = localStorage.getItem(lsKey(LS_STATE));
     if (raw) {
       const parsed = JSON.parse(raw);
       // children 배열이 존재하면 그대로 존중 (사용자가 의도적으로 0명으로 비운 경우 포함)
@@ -4344,8 +4722,8 @@ function loadState() {
         return parsed;
       }
     }
-    // legacy 마이그레이션
-    const legacy = localStorage.getItem(LS_KEY);
+    // legacy 마이그레이션 (계정이 정해진 뒤에는 쓰지 않음 — 이 기기의 공용 칸에는 다른 계정 자료가 있을 수 있음)
+    const legacy = _lsUser ? null : localStorage.getItem(LS_KEY);
     if (legacy) {
       const ws = JSON.parse(legacy);
       const child = migrateLegacyWs(ws);
@@ -4374,11 +4752,16 @@ function getActiveWs(state) {
       _empty: true,
     };
   }
-  const session = (child.sessions || []).find((s) => s.id === child.activeSessionId)
-                  || (child.sessions || [])[0]
+  // ★ 세션마다 그 세션을 채점한 단계(stage)가 적혀 있으면, 지금 단계의 세션만 보이고 비교한다
+  //   (단계를 바꾼 뒤 이전 단계 점수가 새 단계 문항과 섞이지 않게. 단계가 안 적힌 예전 세션은 늘 보임)
+  const allSessions = child.sessions || [];
+  //   이 단계 세션이 하나도 없으면 다른 단계 세션을 보여 주지 않는다(빈 화면 → 처음 채점할 때 새 세션이 생김)
+  const stageSessions = allSessions.filter((s) => !s.stage || s.stage === child.meta?.stage);
+  const session = stageSessions.find((s) => s.id === child.activeSessionId)
+                  || stageSessions[0]
                   || blankSession();
-  const preSession = (child.sessions || []).find((s) => s.designation === 'pre');
-  const postSession = (child.sessions || []).find((s) => s.designation === 'post');
+  const preSession = stageSessions.find((s) => s.designation === 'pre');
+  const postSession = stageSessions.find((s) => s.designation === 'post');
   return {
     meta: child.meta,
     decision: child.decision,
@@ -4388,11 +4771,11 @@ function getActiveWs(state) {
     assessment: {
       quarter: session.quarter,
       scores: session.scores,
-      ses: session.ses,
+      ses: sesOf(session, child.meta?.stage),   // ★ 문항 점수로 계산 (표 7-5)
       notes: session.notes,
     },
-    pre: preSession ? { scores: preSession.scores, ses: preSession.ses } : null,
-    post: postSession ? { scores: postSession.scores, ses: postSession.ses } : null,
+    pre: preSession ? { scores: preSession.scores, ses: sesOf(preSession, child.meta?.stage) } : null,
+    post: postSession ? { scores: postSession.scores, ses: sesOf(postSession, child.meta?.stage) } : null,
     iep: child.iep,
     interim: child.interim,
     activities: child.activities,
@@ -4404,7 +4787,7 @@ function getActiveWs(state) {
     _childId: child.id,
     _viewingTeacher: state._viewingTeacher || null,
     _sessionId: session.id,
-    _allSessions: child.sessions || [],
+    _allSessions: stageSessions,
     _preSession: preSession,
     _postSession: postSession,
   };
@@ -4417,7 +4800,21 @@ function applyWsUpdate(state, updaterOrValue) {
   const newWs = typeof updaterOrValue === 'function' ? updaterOrValue(oldWs) : updaterOrValue;
   const childIdx = state.children.findIndex((c) => c.id === state.activeChildId);
   const child = state.children[childIdx];
-  const sessionIdx = (child.sessions || []).findIndex((s) => s.id === child.activeSessionId);
+  // ★ 화면에 보이던 세션(oldWs._sessionId)에 저장 — 가려진 다른 단계 세션에 잘못 저장되지 않게
+  let sessionIdx = (child.sessions || []).findIndex((s) => s.id === oldWs._sessionId);
+  // 이 단계 세션이 없어서 임시 세션을 보고 있었던 경우: 그 내용을 이 단계 세션으로 새로 만들어 저장
+  let childSessions = child.sessions || [];
+  let activeSessionId = child.activeSessionId;
+  if (sessionIdx < 0 && newWs.assessment) {
+    const a = newWs.assessment;
+    const changed = Object.keys(a.scores || {}).length > 0 || Object.keys(a.ses || {}).length > 0 || (a.notes || '').trim();
+    if (changed) {
+      const ns = { ...blankSession(`${STAGE_LABELS[newWs.meta?.stage] || ''} 진단`.trim(), a.quarter || 1), stage: newWs.meta?.stage || child.meta?.stage || null };
+      childSessions = [...childSessions, ns];
+      activeSessionId = ns.id;
+      sessionIdx = childSessions.length - 1;
+    }
+  }
   const updatedChild = {
     ...child,
     meta: newWs.meta,
@@ -4432,15 +4829,17 @@ function applyWsUpdate(state, updaterOrValue) {
     profSupport: newWs.profSupport,
     communicationSchedule: newWs.communicationSchedule,
     fba: newWs.fba,
+    activeSessionId,
     sessions: sessionIdx >= 0
-      ? child.sessions.map((s, i) => i === sessionIdx ? {
+      ? childSessions.map((s, i) => i === sessionIdx ? {
           ...s,
           quarter: newWs.assessment.quarter,
           scores: newWs.assessment.scores,
-          ses: newWs.assessment.ses,
+          // ★ 성장 지표는 화면에서 문항 점수로 계산하므로 저장된 값(예전에 손으로 정한 값)은 그대로 둔다
+          ses: s.ses || {},
           notes: newWs.assessment.notes,
         } : s)
-      : child.sessions,
+      : childSessions,
   };
   return {
     ...state,
@@ -4531,7 +4930,7 @@ function loadWorkspace() {
 
 function loadArchive() {
   try {
-    const raw = localStorage.getItem(LS_ARCHIVE);
+    const raw = localStorage.getItem(lsKey(LS_ARCHIVE));
     if (!raw) return [];
     return JSON.parse(raw);
   } catch (e) {
@@ -4749,7 +5148,12 @@ export default function App() {
 
 // 실제 앱 본체 (로그인 통과 후)
 function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, setLoginPw, loginError, handleLogin, handleLogout, userList, refreshUserList, addUser, removeUser, changeUserPw }) {
+  // ★ 이 기기 저장칸을 로그인한 계정 것으로 맞춘 뒤에 불러온다 (계정이 바뀌면 이 화면이 새로 그려짐)
+  _lsUser = authUser?.id || '';
+  // 예전(계정 구분 전) 이 기기 공용 칸의 자동 백업·템플릿 등은 원장님 계정으로만 옮겨 온다 (선생님 계정으로는 옮기지 않음)
+  if (_lsUser && authUser?.role === 'admin') migrateSharedLocal();
   const [state, setStateRaw] = useState(loadState);
+  const [loadFailed, setLoadFailed] = useState(false); // 서버에서 내 자료를 못 불러왔는지
   const [archive, setArchive] = useState(loadArchive);
   const [showAccountPanel, setShowAccountPanel] = useState(false);
   const [showAdminDash, setShowAdminDash] = useState(false);
@@ -4764,6 +5168,8 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
     if (!authUser?.name || !window.storage) return;
     let timer;
     const check = async () => {
+      // ★ 화면을 안 보고 있을 땐 확인하지 않음 (아이폰 데이터·배터리 절약)
+      if (typeof document !== 'undefined' && document.hidden) { timer = setTimeout(check, 30000); return; }
       try {
         const r = await window.storage.get('gd-aba-state', true);
         if (r?.value) {
@@ -4785,9 +5191,9 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
           }
         }
       } catch (e) {}
-      timer = setTimeout(check, 5000); // 5초마다
+      timer = setTimeout(check, 30000); // 30초마다 (전에는 5초마다 전체 자료를 받아 데이터를 많이 씀)
     };
-    timer = setTimeout(check, 5000);
+    timer = setTimeout(check, 30000);
     return () => { if (timer) clearTimeout(timer); };
   }, [authUser?.name]);
 
@@ -4805,6 +5211,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
   const [allTeacherData, setAllTeacherData] = useState([]); // [{teacher, children:[{name, key, snapshot}]}]
   const [adminLoading, setAdminLoading] = useState(false);
   const sharedLoadedRef = useRef(false);
+  const loadDoneRef = useRef(false); // '내 데이터로 돌아가기'로 이미 내 자료를 받아 왔는지 (처음 불러오기 결과가 늦게 와서 덮어쓰지 않게)
   const [sharedReady, setSharedReady] = useState(false); // ★ [통합본 연결] 내 데이터를 다 불러왔는지
   const viewEditWarnedRef = useRef(false);
 
@@ -4862,25 +5269,51 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
         setSharedReady(true);
         return;
       }
-      try {
-        const key = 'gd-aba-state';
-        const r = await window.storage.get(key, true);
-        if (!cancelled && r?.value) {
-          const loaded = JSON.parse(r.value);
-          if (loaded && Array.isArray(loaded.children)) {
-            setStateRaw(loaded);
+      // ★ 서버에서 못 불러오면(인터넷 끊김 등) 이 기기의 옛 자료로 서버를 덮어쓰지 않도록 저장을 막고 알린다.
+      //   잠깐 끊긴 경우를 위해 1.5초 간격으로 3번까지 다시 시도한다.
+      let ok = false;
+      let loadedState = null;
+      for (let attempt = 0; attempt < 3 && !cancelled; attempt++) {
+        try {
+          const r = await window.storage.get('gd-aba-state', true);
+          if (r && r.error) throw new Error('state');
+          const ar = await window.storage.get('gd-aba-archive', true);
+          if (ar && ar.error) throw new Error('archive');
+          if (cancelled || loadDoneRef.current) return;
+          // 서버 글이 깨져 읽을 수 없는 경우는 (예전처럼) '자료 없음'으로 보고 넘어간다 — 계속 저장이 막히지 않게
+          if (r?.value) {
+            try {
+              const loaded = JSON.parse(r.value);
+              if (loaded && Array.isArray(loaded.children)) { loadedState = loaded; setStateRaw(loaded); }
+            } catch (e) {}
           }
+          if (ar?.value) {
+            try {
+              const loadedArchive = JSON.parse(ar.value);
+              if (Array.isArray(loadedArchive)) setArchive(loadedArchive);
+            } catch (e) {}
+          }
+          ok = true;
+          break;
+        } catch (e) {
+          if (attempt < 2) await new Promise((res) => setTimeout(res, 1500));
         }
-      } catch (e) {}
-      try {
-        const akey = 'gd-aba-archive';
-        const ar = await window.storage.get(akey, true);
-        if (!cancelled && ar?.value) {
-          const loadedArchive = JSON.parse(ar.value);
-          if (Array.isArray(loadedArchive)) setArchive(loadedArchive);
+      }
+      if (cancelled || loadDoneRef.current) return;
+      if (ok) {
+        // ★ 선생님 계정: 이 기기 예전 공용 칸의 아이들이 모두 이 선생님 서버 자료에 있는 아이일 때만
+        //   (= 그 공용 칸이 이 선생님 것일 때만) 예전 자동 백업·템플릿을 옮겨 온다
+        if (authUser?.role !== 'admin' && _lsUser) {
+          try {
+            const old = JSON.parse(localStorage.getItem(LS_STATE) || 'null');
+            const oldIds = (old?.children || []).map((c) => c.id);
+            const mine = new Set((loadedState?.children || []).map((c) => c.id));
+            if (oldIds.length > 0 && oldIds.every((id) => mine.has(id))) migrateSharedLocal();
+          } catch (e) {}
         }
-      } catch (e) {}
-      if (!cancelled) { sharedLoadedRef.current = true; setSharedReady(true); }
+        setLoadFailed(false); sharedLoadedRef.current = true; setSharedReady(true);
+      }
+      else setLoadFailed(true);
     })();
     return () => { cancelled = true; };
     // authUser.name이 바뀔 때(로그인/계정전환)마다 재로드
@@ -4999,7 +5432,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
           ...state,
           _lastEditor: { deviceId: getDeviceId(), at: Date.now() },
         };
-        localStorage.setItem(LS_STATE, JSON.stringify(stamped));
+        localStorage.setItem(lsKey(LS_STATE), JSON.stringify(stamped));
         saveBackup(stamped);
         if (window.storage && authUser?.name) {
           window.storage.set('gd-aba-state', JSON.stringify(stamped), true).catch(() => {});
@@ -5016,7 +5449,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
     if (!sharedLoadedRef.current) return;
     if (state._viewingTeacher) return;  // 조회 모드에선 보관함도 저장 안 함
     try {
-      localStorage.setItem(LS_ARCHIVE, JSON.stringify(archive));
+      localStorage.setItem(lsKey(LS_ARCHIVE), JSON.stringify(archive));
       if (window.storage && authUser?.name) {
         window.storage.set('gd-aba-archive', JSON.stringify(archive), true).catch(() => {});
       }
@@ -5055,6 +5488,9 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
     };
   });
 
+  // 새 아동의 치료사 기본값: 원장님은 기존처럼 '민 다 혜', 선생님은 본인 이름
+  const myTherapistName = authUser?.role === 'admin' ? '민 다 혜' : (authUser?.name || '');
+
   // 아동 관리
   const switchChild = useCallback((childId) => {
     setState((s) => ({ ...s, activeChildId: childId }));
@@ -5065,12 +5501,13 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
     setState((s) => {
       if (s._viewingTeacher) { blocked = true; return s; }
       const child = blankChild(name);
+      child.meta.therapist = myTherapistName;
       return { ...s, children: [...s.children, child], activeChildId: child.id };
     });
     if (blocked) { showToast('조회 모드에서는 추가할 수 없습니다. 먼저 "내 데이터로 돌아가기"를 누르세요'); return; }
     setTab('home');
     showToast(`${name || '새 아동'}이(가) 추가되었습니다`);
-  }, [showToast]);
+  }, [showToast, myTherapistName]);
 
   // ★ [통합본 연결] 원장님 계정일 때만: 같은 아이가 있으면 그 아이를 열고, 없으면 물어본 뒤 이름·생년월일을 넣어 새로 추가
   const [abaLink, setAbaLink] = useState(() => readAbaChildLink('scerts'));
@@ -5095,7 +5532,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
         setState((s) => {
           if (s._viewingTeacher) return s;
           const child = blankChild(link.name);
-          child.meta = { ...child.meta, birthDate: link.birth || '', abaChildId: link.cid };
+          child.meta = { ...child.meta, birthDate: link.birth || '', abaChildId: link.cid, therapist: myTherapistName };
           return { ...s, children: [...s.children, child], activeChildId: child.id };
         });
         setTab('home');
@@ -5105,7 +5542,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [abaLink, authUser, sharedReady]);
+  }, [abaLink, authUser, sharedReady, myTherapistName]);
 
   const loadSampleChild = useCallback((stage = 'language') => {
     let blocked = false;
@@ -5154,7 +5591,8 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
     setState((s) => ({
       ...s,
       children: s.children.map((c) => c.id === s.activeChildId
-        ? { ...c, sessions: [...(c.sessions || []), newSes], activeSessionId: newSes.id }
+        // ★ 새 세션에 지금 단계를 적어 둔다 (단계를 바꾸면 그 단계 세션끼리만 보이고 비교되게)
+        ? { ...c, sessions: [...(c.sessions || []), { ...newSes, stage: c.meta?.stage || null }], activeSessionId: newSes.id }
         : c),
     }));
     showToast(`새 진단 세션 "${newSes.label}"이(가) 추가되었습니다`);
@@ -5166,7 +5604,9 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
         if (c.id !== s.activeChildId) return c;
         if ((c.sessions || []).length <= 1) return c;
         const filtered = c.sessions.filter((x) => x.id !== sessionId);
-        const newActive = c.activeSessionId === sessionId ? filtered[0].id : c.activeSessionId;
+        // 지운 세션이 열려 있었으면 같은 단계의 다른 세션을 연다
+        const sameStage = filtered.find((x) => !x.stage || x.stage === c.meta?.stage);
+        const newActive = c.activeSessionId === sessionId ? (sameStage || filtered[0]).id : c.activeSessionId;
         return { ...c, sessions: filtered, activeSessionId: newActive };
       }),
     }));
@@ -5184,18 +5624,54 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
       ...s,
       children: s.children.map((c) => {
         if (c.id !== s.activeChildId) return c;
-        // 같은 designation 다른 세션은 해제
+        // 같은 designation 다른 세션은 해제 (같은 단계 세션만 — 다른 단계의 사전/사후 지정은 그대로 둠)
+        const sameStage = (x) => !x.stage || x.stage === c.meta?.stage;
         return {
           ...c,
           sessions: c.sessions.map((x) => {
             if (x.id === sessionId) return { ...x, designation };
-            if (designation && x.designation === designation) return { ...x, designation: null };
+            if (designation && x.designation === designation && sameStage(x)) return { ...x, designation: null };
             return x;
           }),
         };
       }),
     }));
   }, []);
+
+  // ★ 단계 바꾸기를 한 번에 처리 (되돌리기 ↶ 한 번에 원래대로 돌아가게)
+  //   - 단계가 안 적힌 지금 세션들에 이전 단계를 적어 둠 (열린 세션이 비어 있으면 새 단계용으로 씀)
+  //   - 새 단계 세션이 있으면 그것을 열고, 없으면 빈 세션을 하나 만듦
+  const switchStage = useCallback((newStage) => {
+    setState((st) => {
+      if (st._viewingTeacher) return st;
+      return {
+        ...st,
+        children: st.children.map((c) => {
+          if (c.id !== st.activeChildId) return c;
+          const prev = c.meta?.stage || null;
+          let sessions = c.sessions || [];
+          if (prev && prev !== newStage) {
+            sessions = sessions.map((x) => {
+              if (x.stage) return x;
+              const empty = Object.keys(x.scores || {}).length === 0 && Object.keys(x.ses || {}).length === 0 && !(x.notes || '').trim() && !x.designation;
+              if (x.id === c.activeSessionId && empty) return { ...x, stage: newStage };
+              return { ...x, stage: prev };
+            });
+          }
+          const visible = sessions.filter((x) => !x.stage || x.stage === newStage);
+          let activeId = c.activeSessionId;
+          if (visible.length === 0) {
+            const ns = { ...blankSession(`${STAGE_LABELS[newStage]} 진단`, 1), stage: newStage };
+            sessions = [...sessions, ns];
+            activeId = ns.id;
+          } else if (!visible.some((x) => x.id === activeId)) {
+            activeId = visible[visible.length - 1].id;
+          }
+          return { ...c, meta: { ...c.meta, stage: newStage }, sessions, activeSessionId: activeId };
+        }),
+      };
+    });
+  }, [setState]);
 
   const updateMeta = useCallback((patch) => {
     setWs((s) => ({ ...s, meta: { ...s.meta, ...patch } }));
@@ -5222,24 +5698,18 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
     });
   }, [setWs]);
 
-  const updateSes = useCallback((id, value) => {
-    setWs((s) => ({
-      ...s,
-      assessment: {
-        ...s.assessment,
-        ses: { ...s.assessment.ses, [id]: value },
-      },
-    }));
-  }, [setWs]);
-
   // 사전/사후 저장: 현재 활성 세션을 사전/사후로 지정
   const savePre = () => {
     if (!ws._sessionId) return;
+    // 이 단계 세션이 아직 없으면(빈 임시 화면) 지정할 세션이 없음 → 안내
+    if (!(ws._allSessions || []).some((x) => x.id === ws._sessionId)) { showToast('먼저 점수를 하나 이상 입력해 세션을 만든 뒤 지정해 주세요'); return; }
     setSessionDesignation(ws._sessionId, 'pre');
     showToast('현재 세션이 "사전 진단"으로 지정되었습니다');
   };
   const savePost = () => {
     if (!ws._sessionId) return;
+    // 이 단계 세션이 아직 없으면(빈 임시 화면) 지정할 세션이 없음 → 안내
+    if (!(ws._allSessions || []).some((x) => x.id === ws._sessionId)) { showToast('먼저 점수를 하나 이상 입력해 세션을 만든 뒤 지정해 주세요'); return; }
     setSessionDesignation(ws._sessionId, 'post');
     showToast('현재 세션이 "사후 진단"으로 지정되었습니다');
   };
@@ -5267,6 +5737,58 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
 
   const removeArchive = (id) => {
     setArchive((a) => a.filter((x) => x.id !== id));
+  };
+
+  // ★ 보관함 불러오기: 그 보고서의 '주인 아이'에게만 되돌려 넣는다 (지금 열린 다른 아이를 덮어쓰지 않게) + 먼저 확인
+  const loadArchiveItem = async (snap, item) => {
+    if (!snap) return;
+    if (state._viewingTeacher) { showToast('조회 모드에서는 불러올 수 없습니다. 먼저 "내 데이터로 돌아가기"를 누르세요'); return; }
+    const name = (item && item.childName) || snap.meta?.childName || '이름 없음';
+    const when = item && item.savedAt ? new Date(item.savedAt).toLocaleString('ko-KR') : '';
+    const ok = await appConfirm(
+      `"${name}"의 자료를 이 보고서를 저장했던 때(${when}) 내용으로 되돌립니다.\n\n` +
+      `그 뒤에 쓴 질문지·진단 점수·활동 기록 등은 이 보고서 시점으로 바뀝니다.\n` +
+      `(다른 아이 자료는 바뀌지 않으며, 잘못 눌렀으면 위쪽 ↶ 버튼으로 되돌릴 수 있습니다)\n\n계속할까요?`);
+    if (!ok) return;
+    setState((s) => {
+      if (s._viewingTeacher) return s;
+      // 주인 아이 찾기: 보관 당시 아이 번호. 번호가 없는 아주 예전 보관 자료만 이름으로 찾는다
+      //   (번호가 있는데 그 아이가 지워졌으면, 같은 이름의 다른 아이를 덮어쓰지 않도록 새 아이로 만든다)
+      const cid = (item && item.childId) || snap._childId || null;
+      let target = cid ? s.children.find((c) => c.id === cid) : null;
+      if (!target && !cid) target = s.children.find((c) => (c.meta?.childName || '') === name) || null;
+      let children = s.children;
+      let targetId;
+      if (target) {
+        targetId = target.id;
+      } else {
+        const c = blankChild(snap.meta?.childName || '');
+        children = [...children, c];
+        targetId = c.id;
+      }
+      // ★ 점수는 보관 당시 열려 있던 '그 진단 세션'에 되돌린다 (지금 열린 다른 세션을 덮어쓰지 않게).
+      //   그 세션이 지워졌으면 새 세션을 만들어 거기에 넣는다.
+      const snapStage = snap.meta?.stage || null;
+      children = children.map((c) => {
+        if (c.id !== targetId) return c;
+        // 지금 단계와 다른 단계로 되돌리면, 단계가 안 적힌 지금 세션들에 지금 단계를 먼저 적어 둔다 (섞여 보이지 않게)
+        const curStage = c.meta?.stage || null;
+        const sessions = (curStage && curStage !== snapStage)
+          ? (c.sessions || []).map((x) => (x.stage || x.id === snap._sessionId) ? x : { ...x, stage: curStage })
+          : (c.sessions || []);
+        const found = snap._sessionId && sessions.find((x) => x.id === snap._sessionId);
+        if (found) {
+          return { ...c, sessions, meta: { ...c.meta, stage: snapStage }, activeSessionId: found.id };
+        }
+        const ns = { ...blankSession('보관함에서 복원', snap.assessment?.quarter || 1), stage: snapStage };
+        // 새로 만든 아이의 빈 첫 세션은 쓰지 않고 복원 세션만 남긴다
+        const keep = target ? sessions : [];
+        return { ...c, meta: { ...c.meta, stage: snapStage }, sessions: [...keep, ns], activeSessionId: ns.id };
+      });
+      return applyWsUpdate({ ...s, children, activeChildId: targetId }, snap);
+    });
+    setTab('home');
+    showToast(`${name}의 보관 자료를 불러왔습니다`);
   };
 
   // JSON export/import (다중 아동 전체 백업)
@@ -5338,7 +5860,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
             showToast(`${importedChild.meta.childName} 데이터 가져오기 완료`);
           } else {
             // 전체 백업: 교체 확인
-            if (state.children.length > 1 || state.children[0].meta.childName) {
+            if (state.children.length > 1 || state.children[0]?.meta?.childName) {  // ★ 아동 0명이어도 멈추지 않게
               if (!await appConfirm(`전체 백업 파일입니다 (${data.state.children.length}명).\n현재 ${state.children.length}명의 데이터가 모두 교체됩니다.\n진행하시겠습니까?`)) return;
             }
             setState(data.state);
@@ -5352,7 +5874,8 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
           if (child) {
             setState((s) => {
               const first = s.children[0];
-              const isEmptyFirst = !first.meta.childName && !first.meta.stage;
+              const isEmptyFirst = !!first && !first.meta?.childName && !first.meta?.stage;
+              if (!first) return { ...s, children: [child], activeChildId: child.id };
               return isEmptyFirst
                 ? { children: [child, ...s.children.slice(1)], activeChildId: child.id }
                 : { children: [...s.children, child], activeChildId: child.id };
@@ -5397,6 +5920,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
   const newWorkspace = async () => {
     if (await appConfirm('현재 활성 아동의 모든 데이터가 초기화됩니다. 계속하시겠습니까?\n(다른 아동들은 영향받지 않습니다)')) {
       const fresh = blankChild('');
+      fresh.meta.therapist = myTherapistName;
       setState((s) => ({
         ...s,
         children: s.children.map((c) => c.id === s.activeChildId ? { ...fresh, id: c.id } : c),
@@ -5571,26 +6095,58 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
           </span>
           <button className="viewing-banner-btn" onClick={async () => {
             // 관리자 본인 데이터로 복귀
+            const prevLoaded = sharedLoadedRef.current;
             sharedLoadedRef.current = false;
             if (window.storage && authUser?.name) {
+              // ★ 내 자료를 못 불러오면 조회 모드를 그대로 둔다 (보던 선생님 자료가 내 계정에 저장되지 않게)
+              //   저장 가능 여부도 원래대로 둔다 (처음 불러오기가 실패했던 경우 계속 저장 막음)
+              const failBack = () => {
+                sharedLoadedRef.current = prevLoaded;
+                showToast('내 자료를 불러오지 못했습니다. 인터넷 연결을 확인하고 다시 눌러 주세요');
+              };
               try {
                 const r = await window.storage.get('gd-aba-state', true);
-                if (r?.value) {
-                  const mine = JSON.parse(r.value);
+                if (r && r.error) { failBack(); return; }
+                // 보관함도 서버 것으로 다시 받아 둔다 (이 기기의 옛 보관함으로 서버를 덮어쓰지 않게)
+                const ar = await window.storage.get('gd-aba-archive', true);
+                if (ar && ar.error) { failBack(); return; }
+                if (ar?.value) {
+                  try { const la = JSON.parse(ar.value); if (Array.isArray(la)) setArchive(la); } catch (e) {}
+                }
+                let mine = null;
+                if (r?.value) { try { mine = JSON.parse(r.value); } catch (e) { mine = null; } }  // 깨진 글은 '자료 없음'으로 (처음 불러오기와 같게)
+                loadDoneRef.current = true;  // 처음 불러오기가 아직 다시 시도 중이어도 이 결과가 우선
+                if (mine && Array.isArray(mine.children)) {
                   delete mine._viewingTeacher;
                   setState(mine);
+                } else if (r?.value) {
+                  // 서버 글이 깨진 경우 → 처음 불러올 때와 같게 이 기기에 있던 내 자료로 (조회 중 자료는 이 칸에 저장되지 않음)
+                  const local = loadState();
+                  delete local._viewingTeacher;
+                  setState(local);
                 } else {
-                  setState((s) => { const c = { ...s }; delete c._viewingTeacher; return c; });
+                  // 내 자료가 아직 하나도 없는 경우 → 빈 상태로 (보던 자료를 가져오지 않음)
+                  setState({ children: [], activeChildId: null });
                 }
-              } catch (e) {
-                setState((s) => { const c = { ...s }; delete c._viewingTeacher; return c; });
-              }
+                // 내 자료를 제대로 받아 왔으니 '못 불러옴' 안내를 내리고 저장을 다시 켠다
+                setLoadFailed(false);
+                setSharedReady(true);
+              } catch (e) { failBack(); return; }
             } else {
               setState((s) => { const c = { ...s }; delete c._viewingTeacher; return c; });
             }
             setTimeout(() => { sharedLoadedRef.current = true; }, 100);
             showToast('내 데이터로 돌아왔습니다');
           }}>내 데이터로 돌아가기</button>
+        </div>
+      )}
+
+      {loadFailed && (
+        <div className="viewing-banner no-print">
+          <span className="viewing-banner-text">
+            ⚠️ 서버에서 내 자료를 불러오지 못했습니다. 지금 화면에서 고친 내용은 저장되지 않습니다. 인터넷 연결을 확인한 뒤 새로고침해 주세요.
+          </span>
+          <button className="viewing-banner-btn" onClick={() => window.location.reload()}>새로고침</button>
         </div>
       )}
 
@@ -5640,8 +6196,21 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
             ws={ws}
             setWs={setWs}
             recommendedStage={recommendedStage}
-            onChosen={(s) => {
-              updateMeta({ stage: s });
+            onChosen={async (s) => {
+              // ★ 이미 점수가 있는데 단계를 바꾸면: 단계마다 같은 번호라도 문항 내용이 달라 점수가 엉뚱한 문항에 붙음 → 확인
+              const prev = ws.meta.stage;
+              if (ws._viewingTeacher) { updateMeta({ stage: s }); return; }  // 조회 모드: 읽기 전용 안내만
+              const hasScores = (ws._allSessions || []).some((x) => Object.keys(x.scores || {}).length > 0);
+              if (prev && prev !== s && hasScores) {
+                const ok = await appConfirm(
+                  `단계를 ${STAGE_LABELS[prev]}에서 ${STAGE_LABELS[s]}(으)로 바꿉니다.\n\n` +
+                  `단계마다 같은 번호라도 문항 내용이 달라서, 지금까지 매긴 점수를 그대로 두면 다른 문항의 점수로 잘못 들어갑니다.\n\n` +
+                  `확인을 누르면 지금까지의 진단 세션은 '${STAGE_LABELS[prev]}' 세션으로 따로 보관되고(지워지지 않음), ` +
+                  `'${STAGE_LABELS[s]}' 세션만 보입니다. 그 단계 세션이 전에 있었으면 다시 보이고, 없으면 빈 세션을 새로 만듭니다. ` +
+                  `사전/사후 비교와 진전 그래프도 같은 단계 세션끼리만 계산됩니다.`);
+                if (!ok) return;
+              }
+              if (prev !== s) switchStage(s);
               setTab('interview');
               showToast(`${STAGE_LABELS[s]}로 설정되었습니다`);
             }}
@@ -5654,7 +6223,6 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
           <AssessmentTab
             ws={ws}
             updateScore={updateScore}
-            updateSes={updateSes}
             setWs={setWs}
             onSavePre={savePre}
             onSavePost={savePost}
@@ -5721,7 +6289,7 @@ function AppInner({ authUser, authLoading, loginEmail, setLoginEmail, loginPw, s
         {tab === 'archive' && (
           <ArchiveTab
             archive={archive}
-            onLoad={(snap) => { setWs(snap); setTab('home'); showToast('불러오기 완료'); }}
+            onLoad={loadArchiveItem}
             onRemove={removeArchive}
           />
         )}
@@ -6393,10 +6961,12 @@ function Home({ ws, setTab, updateMeta, archiveCount, state, switchChild, addChi
           <div className="child-card-grid">
             {state.children.map((c) => {
               const isActive = c.id === state.activeChildId;
-              const sessionCount = (c.sessions || []).length;
-              const preDone = (c.sessions || []).some((s) => s.designation === 'pre');
-              const postDone = (c.sessions || []).some((s) => s.designation === 'post');
-              const scoredCount = (c.sessions || []).reduce((a, s) => a + Object.keys(s.scores || {}).length, 0);
+              // ★ 지금 단계의 세션만 센다 (다른 단계로 보관된 세션은 빼고)
+              const cs = (c.sessions || []).filter((s) => !s.stage || s.stage === c.meta?.stage);
+              const sessionCount = cs.length;
+              const preDone = cs.some((s) => s.designation === 'pre');
+              const postDone = cs.some((s) => s.designation === 'post');
+              const scoredCount = cs.reduce((a, s) => a + Object.keys(s.scores || {}).length, 0);
               const stageStr = c.meta.stage ? STAGE_LABELS[c.meta.stage] : '단계 미정';
               return (
                 <div key={c.id} className={`child-card ${isActive ? 'active' : ''}`}>
@@ -6743,7 +7313,7 @@ function DecisionTab({ ws, setWs, recommendedStage, onChosen }) {
 // =====================================================================
 // 2. ASSESSMENT TAB
 // =====================================================================
-function AssessmentTab({ ws, updateScore, updateSes, setWs, onSavePre, onSavePost,
+function AssessmentTab({ ws, updateScore, setWs, onSavePre, onSavePost,
                          addSession, switchSession, removeSession, updateSessionMeta, setSessionDesignation,
                          showToast }) {
   const stageData = STAGE_DATA[ws.meta.stage];
@@ -6787,11 +7357,8 @@ function AssessmentTab({ ws, updateScore, updateSes, setWs, onSavePre, onSavePos
       return { pattern: 'insufficient', mrPct, srPct };
     }
 
-    let pattern;
-    if (mrPct >= 0.5 && srPct < 0.4) pattern = 'highMR_lowSR';
-    else if (mrPct < 0.4 && srPct >= 0.5) pattern = 'lowMR_highSR';
-    else if (mrPct < 0.4 && srPct < 0.4) pattern = 'lowMR_lowSR';
-    else pattern = 'balanced';
+    // ★ IEP·중간보고서와 같은 기준 (50% 하나로 강점/요구)
+    const pattern = classifyMrSr(mrPct, srPct) || 'undetermined';
 
     return { pattern, mrPct, srPct };
   }, [ws.assessment.scores, stageData, domainTotals]);
@@ -6852,7 +7419,6 @@ function AssessmentTab({ ws, updateScore, updateSes, setWs, onSavePre, onSavePos
             activeDomain={activeDomain}
             setActiveDomain={setActiveDomain}
             updateScore={updateScore}
-            updateSes={updateSes}
             tree={tree}
             showToast={showToast}
           />
@@ -6879,7 +7445,7 @@ function AssessmentTab({ ws, updateScore, updateSes, setWs, onSavePre, onSavePos
 // ── 채점 뷰 ──────────────────────────────────────────────────────
 function AssessScoreView({
   ws, setWs, stageData, domain, domainTotals, activeDomain, setActiveDomain,
-  updateScore, updateSes, tree, showToast,
+  updateScore, tree, showToast,
 }) {
   // 회기 일지 기반 진단 점수 제안 (역방향 자동 연계)
   const suggestions = useMemo(() => {
@@ -7008,7 +7574,7 @@ function AssessScoreView({
 
       {/* 채점 기준 안내 */}
       <div className="legend">
-        {SCORING_LEGEND.map((l) => (
+        {scoringLegendFor(ws.meta.stage).map((l) => (
           <div key={l.score} className="legend-item">
             <span className={`legend-score score-${l.score}`}>{l.score}</span>
             <span className="legend-label"><strong>{l.label}</strong> · {l.desc}</span>
@@ -7044,7 +7610,7 @@ function AssessScoreView({
       <div className="domain-detail">
         <div className="domain-detail-header">
           <h3>{domain.label}</h3>
-          <div className="domain-detail-score">총점 {domainTotals[activeDomain]} / {domain.maxScore}</div>
+          <div className="domain-detail-score">점수 {domainTotals[activeDomain]} / {domain.maxScore}</div>
         </div>
         {domain.groups.map((group) => (
           <div key={group.title} className="score-group">
@@ -7110,30 +7676,37 @@ function AssessScoreView({
         ))}
       </div>
 
-      {/* 사회-정서 성장 지표 */}
+      {/* 사회-정서 성장 지표 — ★ 문항 점수로 자동 계산 (1권 표 7-5, 265쪽) */}
       <div className="ses-section">
         <h3>사회-정서 성장 지표 (0~10)</h3>
         <p className="hint" style={{ marginBottom: 14 }}>
-          항목 채점이 미시적 능력이라면, 이 지표는 아동의 전반적 발달 방향성을 보여줍니다.
+          지표마다 정해진 교수목표 5개의 점수를 더한 값입니다(1권 표 7-5). 문항 점수를 넣으면 자동으로 바뀝니다.
+          5점 이상은 상대적 강점, 5점 미만은 상대적 요구입니다.
         </p>
-        {SES_INDICATORS.map((ind) => {
-          const v = ws.assessment.ses[ind.id] ?? 0;
-          const range = SES_INTERPRETATION.ranges.find((r) => v >= r.min && v <= r.max);
-          return (
-            <div key={ind.id} className="ses-row">
-              <span className="ses-label">{ind.label}</span>
-              <input
-                type="range"
-                min={0} max={10} step={1}
-                value={v}
-                onChange={(e) => updateSes(ind.id, Number(e.target.value))}
-              />
-              <span className="ses-value" style={{ color: range?.color }}>
-                {v}/10 · {range?.label}
-              </span>
-            </div>
-          );
-        })}
+        {(() => {
+          const calc = computeSes(ws.meta.stage, ws.assessment.scores);
+          return SES_INDICATORS.map((ind) => {
+            const v = calc ? calc.values[ind.id] : (ws.assessment.ses[ind.id] ?? 0);
+            const det = calc ? calc.detail[ind.id] : null;
+            const range = SES_INTERPRETATION.ranges.find((r) => v >= r.min && v <= r.max);
+            const parts = det ? det.parts : (SES_ITEMS[ws.meta.stage]?.[ind.id] || []).map((id) => ({ id, score: null }));
+            return (
+              <div key={ind.id} className="ses-row ses-row-calc">
+                <span className="ses-label">{ind.label}</span>
+                <span className="ses-formula">
+                  {parts.map((p, i) => (
+                    <span key={p.id}>{i > 0 ? ' + ' : ''}{p.id}({p.score === null ? '–' : p.score})</span>
+                  ))}
+                  {det && det.unscored > 0 && <span className="ses-unscored"> · {det.unscored}문항 미채점</span>}
+                  {!calc && Object.keys(ws.assessment.ses || {}).length > 0 && <span className="ses-unscored"> · 문항 점수가 없어 예전에 정해 둔 값</span>}
+                </span>
+                <span className="ses-value" style={{ color: range?.color }}>
+                  {v}/10 · {range?.label}
+                </span>
+              </div>
+            );
+          });
+        })()}
       </div>
 
       {/* 관찰 메모 */}
@@ -7175,7 +7748,7 @@ function AssessObservationView({ ws, setWs }) {
     <div className="observation-inner">
       <div className="info-box no-print">
         <strong>왜 관찰 계획이 필요한가요?</strong><br />
-        SCERTS는 <em>"두 가지 상황에서 두 명의 파트너에 걸쳐 일관성 있게 도달"</em>해야 2점을 줍니다.
+        SCERTS는 <em>"두 가지 이상의 상황에서 {partnerCountWord(ws.meta.stage)} 명 이상의 파트너에 걸쳐 일관성 있게 도달"</em>해야 2점을 줍니다.
         그래서 진단 전에 관찰 환경을 다양하게 계획해야 정확한 채점이 가능합니다.
         최소 2개 자연스러운 상황(예: 가정 + 어린이집)에서, 친숙/비친숙 파트너를 포함해 관찰하세요.
       </div>
@@ -7241,7 +7814,8 @@ function AssessAnalysisView({ ws, setWs, stageData, domainTotals, mrSrAnalysis }
     );
   }
 
-  const mrSrInfo = mrSrAnalysis.pattern !== 'insufficient' ? MR_SR_BRIDGE[mrSrAnalysis.pattern] : null;
+  const mrSrInfo = MR_SR_BRIDGE[mrSrAnalysis.pattern] || null;
+  const mrSrUndetermined = mrSrAnalysis.pattern === 'undetermined';
 
   return (
     <div className="analysis-inner">
@@ -7259,6 +7833,20 @@ function AssessAnalysisView({ ws, setWs, stageData, domainTotals, mrSrAnalysis }
           </div>
         </div>
       </div>
+
+      {/* MR/SR 판정 보류 (지금 기준에서는 나오지 않음) */}
+      {mrSrUndetermined && (
+        <div className="analysis-block">
+          <h3 className="analysis-h3">🌉 상호조절(MR) ↔ 자기조절(SR) 분석</h3>
+          <div className="pattern-card">
+            <div className="pattern-title">패턴 판정 보류</div>
+            <p className="pattern-interpretation">
+              상호조절 {Math.round(mrSrAnalysis.mrPct * 100)}%, 자기조절 {Math.round(mrSrAnalysis.srPct * 100)}%로,
+              조절 패턴을 판정하지 않았습니다.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* MR/SR 다리 분석 */}
       {mrSrInfo && (
@@ -7647,23 +8235,12 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
     });
 
     // 진단 점수 기반 현행 수준 자동 생성
-    const scTotal = (domainTotals.joinAttention?.score || 0) + (domainTotals.symbolUse?.score || 0);
-    const scMax = (domainTotals.joinAttention?.max || 0) + (domainTotals.symbolUse?.max || 0);
-    const erTotal = (domainTotals.mutualReg?.score || 0) + (domainTotals.selfReg?.score || 0);
-    const erMax = (domainTotals.mutualReg?.max || 0) + (domainTotals.selfReg?.max || 0);
-    const tsTotal = (domainTotals.interpersonalSupport?.score || 0) + (domainTotals.learningSupport?.score || 0);
-    const tsMax = (domainTotals.interpersonalSupport?.max || 0) + (domainTotals.learningSupport?.max || 0);
-
     const pct = (a, b) => b ? Math.round((a / b) * 100) : 0;
 
     // MR/SR 패턴 식별
     const mrPct = domainTotals.mutualReg ? domainTotals.mutualReg.score / domainTotals.mutualReg.max : 0;
     const srPct = domainTotals.selfReg ? domainTotals.selfReg.score / domainTotals.selfReg.max : 0;
-    let mrSrPattern = null;
-    if (mrPct >= 0.5 && srPct < 0.4) mrSrPattern = 'highMR_lowSR';
-    else if (mrPct < 0.4 && srPct >= 0.5) mrSrPattern = 'lowMR_highSR';
-    else if (mrPct < 0.4 && srPct < 0.4) mrSrPattern = 'lowMR_lowSR';
-    else if (mrPct >= 0.5 && srPct >= 0.5) mrSrPattern = 'balanced';
+    const mrSrPattern = classifyMrSr(mrPct, srPct);  // ★ 진단 분석·중간보고서와 같은 기준
     const mrSrInfo = mrSrPattern ? MR_SR_BRIDGE[mrSrPattern] : null;
 
     // 질문지 응답에서 핵심 답변 추출 (사회의사소통 1, 정서조절 1, 교류지원 11 등)
@@ -7681,22 +8258,29 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
     // 현행 수준 자동 생성 (진단 결과 + 질문지 정보)
     const cName = ws.meta.childName || '';
     // 보호자 보고 문장: 끝에 마침표 없으면 붙여서 다음 문장과 자연스럽게 분리
-    const q_sc1_clean = q_sc1 ? (q_sc1.slice(0, 100).replace(/[.。]?\s*$/, '') + '. ') : '';
+    // ★ 문장 끝에서 자른다. 문장 끝을 못 찾아 중간에서 잘린 경우 '…'를 남겨 잘린 것이 보이게 한다
+    const q_sc1_cut = q_sc1 ? clipText(q_sc1, 100) : '';
+    const q_sc1_clean = !q_sc1_cut ? '' : (q_sc1_cut.endsWith('…') ? q_sc1_cut + ' ' : q_sc1_cut.replace(/[.。]?\s*$/, '') + '. ');
+    // 구성 요소 점수 문구: "11/20점(55%)"
+    const compScore = (k) => {
+      const d = domainTotals[k] || { score: 0, max: 0 };
+      return `${d.score || 0}/${d.max || 0}점(${pct(d.score || 0, d.max || 0)}%)`;
+    };
     const currentLevel = {
-      sc: `${nmEunNeun(cName)} 사회 의사소통 영역 진단에서 ${scTotal}/${scMax}점(${pct(scTotal, scMax)}%)을 받았다. ` +
+      // ★ 영역 합계(총점)는 쓰지 않음 — 책은 구성 요소 점수만 따로 기록함(1권 254쪽)
+      sc: `${nmEunNeun(cName)} ${profile.headline} 수준에서 공동관심 ${compScore('joinAttention')}, ` +
+          `상징 사용 ${compScore('symbolUse')}으로 나타났다. ` +
           (q_sc1_clean ? `보호자 보고에 따르면 ${q_sc1_clean}` : '') +
-          `${profile.headline} 수준에서 공동관심은 ${pct(domainTotals.joinAttention?.score || 0, domainTotals.joinAttention?.max || 0)}%, ` +
-          `상징 사용은 ${pct(domainTotals.symbolUse?.score || 0, domainTotals.symbolUse?.max || 0)}%로 나타났다. ` +
           `점수가 낮은 항목을 IEP 목표로 선정하였다.`,
-      er: `${nmEunNeun(cName)} 정서 조절 영역 진단에서 ${erTotal}/${erMax}점(${pct(erTotal, erMax)}%)을 받았다. ` +
-          `상호조절 ${Math.round(mrPct * 100)}%, 자기조절 ${Math.round(srPct * 100)}%로, ` +
-          `${mrSrInfo ? `${mrSrInfo.title}에 해당한다. ` : '두 영역이 균형적이다. '}` +
+      er: `${nmEunNeun(cName)} 정서 조절 영역에서 상호조절 ${compScore('mutualReg')}, ` +
+          `자기조절 ${compScore('selfReg')}으로, ` +
+          `${mrSrInfo ? `${mrSrInfo.title}에 해당한다. ` : '조절 패턴은 판정하지 않았다. '}` +
           (mrSrInfo ? localizeText(mrSrInfo.interpretation, cName) + ' ' : '') +
-          (q_er_strength ? `흥미를 보이는 활동은 ${q_er_strength.slice(0, 80).replace(/[.。]?\s*$/, '')}이며, ` : '') +
-          (q_er_challenge ? `어려움을 보이는 상황은 ${q_er_challenge.slice(0, 80).replace(/[.。]?\s*$/, '')}이다.` : ''),
-      ts: `${nmEunNeun(cName)} 교류 지원 영역 진단에서 ${tsTotal}/${tsMax}점(${pct(tsTotal, tsMax)}%)을 받았다. ` +
-          `대인관계 지원 ${pct(domainTotals.interpersonalSupport?.score || 0, domainTotals.interpersonalSupport?.max || 0)}%, ` +
-          `학습 지원 ${pct(domainTotals.learningSupport?.score || 0, domainTotals.learningSupport?.max || 0)}% 수준이다. ` +
+          (q_er_strength ? `흥미를 보이는 활동은 ${clipText(q_er_strength, 80).replace(/[.。]?\s*$/, '')}이며, ` : '') +
+          (q_er_challenge ? `어려움을 보이는 상황은 ${clipText(q_er_challenge, 80).replace(/[.。]?\s*$/, '')}이다.` : ''),
+      // ★ 교류 지원은 파트너(어른·환경)에 대한 평가라 아이를 주어로 쓰지 않음(1권 250~251쪽)
+      ts: `파트너의 교류 지원은 대인관계 지원 ${compScore('interpersonalSupport')}, ` +
+          `학습 지원 ${compScore('learningSupport')} 수준이다. ` +
           `파트너의 반응성, 시작행동 촉진, 언어 조절, 시각 지원 사용에서 교실과 가정 간 일관성 확보가 우선 과제이다.`,
     };
 
@@ -7981,7 +8565,7 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
             </table>
           </section>
 
-          <ApprovalBlock reportDate={ws.iep.reportDate || ws.meta.reportDate} />
+          <ApprovalBlock reportDate={ws.iep.reportDate || ws.meta.reportDate} therapist={ws.meta.therapist} />
         </div>
       </div>
     </div>
@@ -8063,18 +8647,22 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     let summary = `${nmEunNeun(cName)} ${profile.headline}(${profile.subtitle}) 수준에 해당한다. ` +
                   `이번 평가 기간 동안 SCERTS 세 영역(사회 의사소통, 정서 조절, 교류 지원)을 중심으로 중재를 진행하였다. `;
     if (compareData) {
-      const totals = compareData.reduce((acc, d) => {
-        acc.pre += d.pre; acc.post += d.post; acc.max += d.max;
-        return acc;
-      }, { pre: 0, post: 0, max: 0 });
-      const delta = totals.post - totals.pre;
-      const pct = totals.max ? Math.round((totals.post / totals.max) * 100) : 0;
-      summary += `진단 총점은 사전 ${totals.pre}/${totals.max}점에서 사후 ${totals.post}/${totals.max}점(${pct}%)으로 ` +
-                 `${delta > 0 ? `${delta}점 상승하였다` : delta < 0 ? `${Math.abs(delta)}점 하락하였다` : '동일하게 유지되었다'}. `;
-      // 가장 진전이 큰 영역 한 가지 강조
-      const topGains = [...compareData].filter((d) => d.delta > 0).sort((a, b) => b.delta - a.delta);
+      // ★ 총점은 쓰지 않는다 — 책(1권 254·265쪽)은 6개 구성 요소 점수를 따로 기록함
+      //   아동 구성 요소(공동관심·상징 사용·상호조절·자기조절)와 파트너(교류 지원)를 나눠 쓴다
+      const TS_KEYS = ['interpersonalSupport', 'learningSupport'];
+      const childDomains = compareData.filter((d) => !TS_KEYS.includes(d.domain));
+      const partnerDomains = compareData.filter((d) => TS_KEYS.includes(d.domain));
+      const fmt = (d) => `${d.label} ${d.pre}→${d.post}/${d.max}점`;
+      if (childDomains.length > 0) {
+        summary += `구성 요소별 진단 점수는 사전에서 사후로 ${childDomains.map(fmt).join(', ')}으로 변화하였다. `;
+      }
+      // 가장 진전이 큰 아동 구성 요소 한 가지 강조 (교류 지원은 파트너 점수라 제외)
+      const topGains = [...childDomains].filter((d) => d.delta > 0).sort((a, b) => b.delta - a.delta);
       if (topGains.length > 0) {
-        summary += `특히 ${topGains[0].label} 영역에서 ${topGains[0].delta}점의 가장 큰 향상이 관찰되었다. `;
+        summary += `특히 ${topGains[0].label}에서 ${topGains[0].delta}점의 가장 큰 향상이 관찰되었다. `;
+      }
+      if (partnerDomains.length > 0) {
+        summary += `파트너의 교류 지원은 ${partnerDomains.map(fmt).join(', ')}으로 변화하였다. `;
       }
     }
     summary += `이 단계의 핵심 발달 과제는 ${profile.features.slice(0, 2).join(', ')}이며, 해당 과제를 중심으로 지원하였다.`;
@@ -8084,8 +8672,9 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     if (familyFocus || familyHope) {
       summary += `\n\n가족 우선순위로는 `;
       if (familyFocus) summary += `"${familyFocus}"`;
-      if (familyHope) summary += `${familyFocus ? '를' : ''} 중점 영역으로 두고, 3개월 내 "${familyHope}"를 단기 희망으로 공유하였다.`;
-      else summary += `를 중심으로 지원하였다.`;
+      // ★ 조사 을/를을 앞말 받침에 맞춤
+      if (familyHope) summary += `${familyFocus ? eulReul(familyFocus) + ' 중점 영역으로 두고, ' : ''}3개월 내 "${familyHope}"${eulReul(familyHope)} 단기 희망으로 공유하였다.`;
+      else summary += `${eulReul(familyFocus)} 중심으로 지원하였다.`;
     }
 
     // 2) 영역별 진전 - 사전/사후 비교 + 영역 내 항목별 향상 (건조한 임상 문체)
@@ -8159,17 +8748,17 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     }
     const mrP = mrMax ? mrSum / mrMax : 0;
     const srP = srMax ? srSum / srMax : 0;
-    let pattern = 'balanced';
-    if (mrP >= 0.5 && srP < 0.4) pattern = 'highMR_lowSR';
-    else if (mrP < 0.4 && srP >= 0.5) pattern = 'lowMR_highSR';
-    else if (mrP < 0.4 && srP < 0.4) pattern = 'lowMR_lowSR';
-    const mrSrInfo = MR_SR_BRIDGE[pattern];
+    const pattern = classifyMrSr(mrP, srP);  // ★ 진단 분석·IEP와 같은 기준 (50% 하나로 강점/요구)
+    const mrSrInfo = pattern ? MR_SR_BRIDGE[pattern] : null;
 
-    let direction = `정서 조절 영역의 현재 프로파일은 상호조절 ${Math.round(mrP * 100)}%, 자기조절 ${Math.round(srP * 100)}%로 ` +
-                    `${mrSrInfo.title}에 해당한다.\n\n` +
-                    `${localizeText(mrSrInfo.interpretation, cName)}\n\n` +
-                    `다음 기간에는 다음 전략을 중점적으로 적용한다.\n` +
-                    mrSrInfo.strategies.map((s, i) => `${i + 1}. ${localizeText(s, cName)}`).join('\n');
+    let direction = mrSrInfo
+      ? `정서 조절 영역의 현재 프로파일은 상호조절 ${Math.round(mrP * 100)}%, 자기조절 ${Math.round(srP * 100)}%로 ` +
+        `${mrSrInfo.title}에 해당한다.\n\n` +
+        `${localizeText(mrSrInfo.interpretation, cName)}\n\n` +
+        `다음 기간에는 다음 전략을 중점적으로 적용한다.\n` +
+        mrSrInfo.strategies.map((s, i) => `${i + 1}. ${localizeText(s, cName)}`).join('\n')
+      : `정서 조절 영역의 현재 프로파일은 상호조절 ${Math.round(mrP * 100)}%, 자기조절 ${Math.round(srP * 100)}%로, ` +
+        `조절 패턴은 판정하지 않았다.`;
     // IEP 주간 우선순위 목표 연결
     const selectedGoals = ws.iep?.selectedGoals || [];
     if (selectedGoals.length > 0) {
@@ -8508,7 +9097,7 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
             </ol>
           </section>
 
-          <ApprovalBlock reportDate={ws.interim.reportDate || ws.meta.reportDate} />
+          <ApprovalBlock reportDate={ws.interim.reportDate || ws.meta.reportDate} therapist={ws.meta.therapist} />
         </div>
       </div>
     </div>
@@ -8712,7 +9301,7 @@ function ArchiveTab({ archive, onLoad, onRemove }) {
                 </div>
               </div>
               <div className="archive-actions">
-                <button className="btn-ghost" onClick={() => onLoad(a.snapshot)}>불러오기</button>
+                <button className="btn-ghost" onClick={() => onLoad(a.snapshot, a)}>불러오기</button>
                 <button className="btn-danger" onClick={async () => {
                   if (await appConfirm('이 항목을 삭제하시겠습니까?')) onRemove(a.id);
                 }}>삭제</button>
@@ -8869,7 +9458,8 @@ function ExternalFillPage({ token }) {
   });
   // 특수 타입(emotionsRows/recoveryPair/scale02List) 공용 setter: 객체 병합
   const setObjField = (id, field, val) => setAnswers((a) => {
-    const cur = a[id] && typeof a[id] === 'object' ? { ...a[id] } : {};
+    // 예전에 '글 한 덩어리'로 적어 둔 임시저장이 있으면 __old로 남겨 둔다
+    const cur = a[id] && typeof a[id] === 'object' ? { ...a[id] } : (typeof a[id] === 'string' && a[id].trim() ? { __old: a[id] } : {});
     cur[field] = val;
     return { ...a, [id]: cur };
   });
@@ -8903,9 +9493,12 @@ function ExternalFillPage({ token }) {
           const rows = Object.keys(v).filter((k) => v[k] != null && v[k] !== '');
           if (rows.length) { out[id] = {}; rows.forEach((k) => { out[id][k] = v[k]; }); }
         }
-      } else if (type === 'emotionsRows' || type === 'recoveryPair' || type === 'scale02List') {
+      } else if (type === 'emotionsRows' || type === 'emotionPairs' || type === 'recoveryPair' || type === 'scale02List') {
         // 값이 있는 필드만 남김 (선생님 렌더 형식과 동일한 객체 구조 유지)
-        if (v && typeof v === 'object') {
+        if (typeof v === 'string') {
+          // 예전 임시저장(글 한 덩어리)은 그대로 보낸다 → 선생님 화면에서 '받은 답'으로 보임
+          if (v.trim()) out[id] = v;
+        } else if (v && typeof v === 'object') {
           const obj = {};
           Object.keys(v).forEach((k) => {
             const val = v[k];
@@ -9101,6 +9694,29 @@ function ExtQuestion({ q, idx, value, onText, onToggle, onExtra, onFreq, onObj }
             </div>
           ))}
         </div>
+      ) : q.type === 'emotionPairs' ? (
+        // ★ 긍정/부정 감정 짝 — 감정별로 나눠서 작성 (선생님 화면 칸과 같은 형식)
+        <div>
+          {(() => {
+            const old = typeof value === 'string' ? value : (value && value.__old) || '';
+            return old.trim() ? (
+              <div style={{ fontSize: 12.5, color: '#6b5320', background: '#fef7e6', border: '1px dashed #c19a3a', borderRadius: 6, padding: '7px 10px', marginBottom: 8, whiteSpace: 'pre-wrap' }}>
+                이전에 적어 두신 답: {old}
+              </div>
+            ) : null;
+          })()}
+          {(q.pairs || []).flat().map((emo) => (
+            <div key={emo} style={{ marginBottom: 8 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 4 }}>{emo}</div>
+              <textarea
+                value={(value && value[emo]) || ''}
+                placeholder="어떻게 표현하는지 적어주세요"
+                onChange={(e) => onObj(q.id, emo, e.target.value)}
+                style={{ ...extStyles.textarea, minHeight: 44 }}
+              />
+            </div>
+          ))}
+        </div>
       ) : q.type === 'recoveryPair' ? (
         // 스스로 회복 / 파트너 도움 두 칸으로 분리
         <div>
@@ -9235,7 +9851,7 @@ function InterviewTab({ ws, setWs, showToast }) {
     const writer = sub.writer || incoming.__writer || '';
     setWs((s) => {
       const merged = { ...s.interview.answers };
-      Object.keys(incoming).forEach((k) => { if (k !== '__writer') merged[k] = incoming[k]; });
+      Object.keys(incoming).forEach((k) => { if (k !== '__writer') merged[k] = keepOldAnswer(merged[k], incoming[k]); });
       const newMeta = { ...s.interview.meta };
       if (writer && !newMeta.reporter) {
         const parts = writer.split('/').map((x) => x.trim());
@@ -9294,7 +9910,7 @@ function InterviewTab({ ws, setWs, showToast }) {
     const writer = incoming.__writer || '';
     setWs((s) => {
       const merged = { ...s.interview.answers };
-      Object.keys(incoming).forEach((k) => { if (k !== '__writer') merged[k] = incoming[k]; });
+      Object.keys(incoming).forEach((k) => { if (k !== '__writer') merged[k] = keepOldAnswer(merged[k], incoming[k]); });
       const newMeta = { ...s.interview.meta };
       if (writer && !newMeta.reporter) {
         // "이름 / 관계" 형태면 분리 시도
@@ -9517,10 +10133,77 @@ function InterviewTab({ ws, setWs, showToast }) {
               </div>
             </section>
           ))}
+
+          {/* ★ 질문지를 책(1권 부록) 문장대로 바꾸기 전에 받은 답 — 지우지 않고 여기에 보관 */}
+          {(() => {
+            const retired = (RETIRED_INTERVIEW_QUESTIONS[ws.meta.stage] || [])
+              .filter((q) => answerHasContent(ws.interview.answers[q.id]));
+            if (retired.length === 0) return null;
+            return (
+              <section className="report-section interview-section interview-retired">
+                <h3 className="report-h3">예전 질문지에 받은 답</h3>
+                <p className="hint" style={{ marginTop: 0 }}>
+                  질문지를 책(1권 부록) 문장대로 바꾸기 전에 받은 답입니다. 지금 질문지에는 없는 질문이라 지우지 않고 여기에 보관합니다.
+                </p>
+                <div className="interview-questions">
+                  {retired.map((q, idx) => (
+                    <InterviewQuestion
+                      key={q.id}
+                      q={{ ...q, q: `[예전 · ${q.section}] ${q.q}` }}
+                      index={idx + 1}
+                      value={ws.interview.answers[q.id]}
+                      onChange={(v) => updateAnswer(q.id, v)}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })()}
         </div>
       </div>
     </div>
   );
+}
+
+// ★ 칸이 여러 개인 문항에 예전 방식으로 '글 한 덩어리'가 들어온 경우: 그 글을 지우지 않고 보여 주기만 한다
+//   칸에 새로 입력해도 그 글은 '__old'에 그대로 남는다 (objAnswer 참고)
+function OldTextNote({ value }) {
+  const old = typeof value === 'string' ? value : (value && typeof value === 'object' ? value.__old : '');
+  if (typeof old !== 'string' || !old.trim()) return null;
+  return (
+    <div className="iq-old-text">
+      <b>받은 답(한 덩어리로 들어온 글):</b> {old}
+    </div>
+  );
+}
+// 칸이 여러 개인 문항의 답: 예전 '글 한 덩어리'면 __old에 담아 두고 칸 입력은 따로 받는다
+// 부모 답을 다시 받아 덮어쓸 때, 칸 여러 개 문항에 있던 예전 '글 한 덩어리'(또는 __old)는 남겨 둔다
+// 답에 실제 내용이 있는지 (빈 글·빈 칸·체크 해제만 있으면 false)
+function answerHasContent(v) {
+  if (v === null || v === undefined) return false;
+  if (typeof v === 'string') return v.trim().length > 0;
+  if (typeof v === 'number') return true;
+  if (typeof v === 'boolean') return v;
+  if (Array.isArray(v)) return v.some(answerHasContent);
+  if (typeof v === 'object') return Object.values(v).some(answerHasContent);
+  return false;
+}
+function keepOldAnswer(prev, incoming) {
+  // 칸별로 적어 둔 답(prev 객체)이 있는데 글 한 덩어리가 다시 들어오면: 칸 답은 두고 그 글은 __old로
+  if (typeof incoming === 'string') {
+    if (prev && typeof prev === 'object' && !Array.isArray(prev) && Object.keys(prev).some((k) => k !== '__old')) {
+      return incoming.trim() ? { ...prev, __old: incoming } : prev;
+    }
+    return incoming;
+  }
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming;
+  const old = typeof prev === 'string' ? prev : (prev && typeof prev === 'object' ? prev.__old : '');
+  if (typeof old === 'string' && old.trim() && !incoming.__old) return { ...incoming, __old: old };
+  return incoming;
+}
+function objAnswer(value) {
+  if (typeof value === 'string') return value.trim() ? { __old: value } : {};
+  return (value && typeof value === 'object') ? value : {};
 }
 
 function InterviewQuestion({ q, index, value, onChange }) {
@@ -9590,6 +10273,14 @@ function InterviewQuestion({ q, index, value, onChange }) {
                 />
               </div>
             ))}
+          {/* ★ 질문지 보기를 책대로 바꾸기 전에 고른 답: 지우지 않고 보여 준다 */}
+          {(() => {
+            const known = new Set([...(q.options || []), ...((q.withText || []).map((w) => w.id))]);
+            const extra = Object.keys(v.checked || {}).filter((k) => v.checked[k] && !known.has(k));
+            return extra.length > 0
+              ? <div className="iq-old-text"><b>예전 보기에서 고른 것:</b> {extra.join(', ')}</div>
+              : null;
+          })()}
         </div>
       </div>
     );
@@ -9631,11 +10322,12 @@ function InterviewQuestion({ q, index, value, onChange }) {
   }
 
   if (q.type === 'emotionsRows' || q.type === 'emotionPairs') {
-    const v = value || {};
+    const v = objAnswer(value);
     if (q.type === 'emotionsRows') {
       return (
         <div className="iq-row">
           <div className="iq-q"><span className="iq-idx">{index}.</span> {q.q}</div>
+          <OldTextNote value={value} />
           <table className="iq-emotion-table">
             <tbody>
               {q.emotions.map((emo) => (
@@ -9660,6 +10352,7 @@ function InterviewQuestion({ q, index, value, onChange }) {
     return (
       <div className="iq-row">
         <div className="iq-q"><span className="iq-idx">{index}.</span> {q.q}</div>
+        <OldTextNote value={value} />
         <table className="iq-emotion-pair-table">
           <thead>
             <tr><th>긍정적인 감정</th><th>부정적인 감정</th></tr>
@@ -9688,10 +10381,11 @@ function InterviewQuestion({ q, index, value, onChange }) {
   }
 
   if (q.type === 'recoveryPair') {
-    const v = value || {};
+    const v = objAnswer(value);
     return (
       <div className="iq-row">
         <div className="iq-q"><span className="iq-idx">{index}.</span> {q.q}</div>
+        <OldTextNote value={value} />
         <div className="iq-recovery">
           <div className="iq-recovery-block">
             <div className="iq-recovery-label">• {q.self}</div>
@@ -9717,10 +10411,11 @@ function InterviewQuestion({ q, index, value, onChange }) {
   }
 
   if (q.type === 'scale02List') {
-    const v = value || {};
+    const v = objAnswer(value);
     return (
       <div className="iq-row">
         <div className="iq-q"><span className="iq-idx">{index}.</span> {q.q}</div>
+        <OldTextNote value={value} />
         <table className="iq-scale-table">
           <tbody>
             {q.items.map((item, i) => (
@@ -9875,6 +10570,13 @@ function ActivityTab({ ws, setWs, showToast }) {
   );
 }
 
+// ★ 회기 목표 표에서 아래 줄부터 쓰면 위의 빈 줄이 '구멍'으로 남아 나중에 멈춤을 일으킴 → 빈 줄로 채워 둔다
+function fillRows(rows, uptoIdx) {
+  const arr = [...(rows || [])];
+  for (let k = 0; k <= uptoIdx; k++) if (!arr[k]) arr[k] = { goal: '', observed: '', rating: '' };
+  return arr;
+}
+
 function ActivityLogI({ ws, setWs, showToast }) {
   const [activeIdx, setActiveIdx] = useState(0);
   const logs = ws.activities.logI || [];
@@ -9978,6 +10680,39 @@ function ActivityLogI({ ws, setWs, showToast }) {
 
   const refreshTemplates = () => setTemplates(loadTemplates());
 
+  // ★ 서버에 저장된 템플릿을 받아 온다 (다른 기기에서 만든 템플릿도 보이게).
+  //   서버에 아직 없으면 이 기기 것을 서버로 올려 둔다.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (!window.storage) return;
+        const r = await window.storage.get('gd-aba-templates', true);
+        if (!alive || (r && r.error)) return;
+        let server = [];
+        try { const v = r?.value ? JSON.parse(r.value) : []; if (Array.isArray(v)) server = v; } catch (e) {}
+        // ★ 서버 것과 이 기기 것을 합친다 (어느 한쪽 템플릿이 사라지지 않게). 불러오는 사이 새로 저장한 것도 포함
+        // 지운 템플릿 목록(서버 + 이 기기)을 합쳐서, 지운 것은 다시 넣지 않는다
+        const rd = await window.storage.get('gd-aba-templates-deleted', true);
+        if (!alive || (rd && rd.error)) return;
+        let delServer = [];
+        try { const v = rd?.value ? JSON.parse(rd.value) : []; if (Array.isArray(v)) delServer = v; } catch (e) {}
+        const deleted = new Set([...delServer, ...loadDeletedTemplateIds()]);
+        if (deleted.size > delServer.length) saveDeletedTemplateIds([...deleted].slice(-500));
+        const local = loadTemplates();  // 기다리는 사이 새로 저장한 템플릿도 포함되도록 마지막에 읽는다
+        const byId = new Map();
+        [...server, ...local].forEach((t) => { if (t && t.id && !deleted.has(t.id) && !byId.has(t.id)) byId.set(t.id, t); });
+        const merged = [...byId.values()].sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+        setTemplates(merged);
+        const serverIds = new Set(server.map((t) => t && t.id));
+        const changed = merged.length !== server.length || merged.some((t) => !serverIds.has(t.id));
+        if (changed) saveTemplates(merged);
+        else { try { localStorage.setItem(lsKey(LS_TEMPLATES), JSON.stringify(merged)); } catch (e) {} }
+      } catch (e) {}
+    })();
+    return () => { alive = false; };
+  }, []);
+
   const saveCurrentAsTemplate = async () => {
     if (!log) return;
     const defaultName = log.fields?.activity || '회기 템플릿';
@@ -9989,9 +10724,9 @@ function ActivityLogI({ ws, setWs, showToast }) {
       createdAt: new Date().toISOString(),
       fields: { ...(log.fields || {}) },
       // 평가는 비워둠 (재사용 시 새로 평가)
-      goalsSocial: (log.goalsSocial || []).map((g) => ({ goal: g.goal, observed: '', rating: '' })),
-      goalsEmo: (log.goalsEmo || []).map((g) => ({ goal: g.goal, observed: '', rating: '' })),
-      partnerGoals: (log.partnerGoals || []).map((g) => ({ goal: g.goal, observed: '', rating: '' })),
+      goalsSocial: (log.goalsSocial || []).map((g) => ({ goal: g?.goal || '', observed: '', rating: '' })),
+      goalsEmo: (log.goalsEmo || []).map((g) => ({ goal: g?.goal || '', observed: '', rating: '' })),
+      partnerGoals: (log.partnerGoals || []).map((g) => ({ goal: g?.goal || '', observed: '', rating: '' })),
     };
     const updated = [newTpl, ...templates];
     saveTemplates(updated);
@@ -10016,6 +10751,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
   const deleteTemplate = async (id, name) => {
     if (!await appConfirm(`템플릿 "${name}"을 삭제하시겠습니까?`)) return;
     const updated = templates.filter((t) => t.id !== id);
+    markTemplateDeleted(id);  // ★ 다른 기기에 남은 사본이 합쳐지면서 되살아나지 않게 '지운 것'으로 기록
     saveTemplates(updated);
     setTemplates(updated);
   };
@@ -10048,6 +10784,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
       // 검색 대상: 날짜, 활동명, 메모, 목표 내용
       const fields = Object.values(l.fields || {}).join(' ').toLowerCase();
       const goals = [...(l.goalsSocial || []), ...(l.goalsEmo || []), ...(l.partnerGoals || [])]
+        .filter(Boolean)  // ★ 비어 있는 줄이 있어도 멈추지 않게
         .map((g) => `${g.goal || ''} ${g.observed || ''}`).join(' ').toLowerCase();
       const notes = (l.notes || '').toLowerCase();
       const matched = (l.date || '').includes(q) || fields.includes(q) || goals.includes(q) || notes.includes(q);
@@ -10190,7 +10927,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
                           <Editable
                             value={item.goal}
                             onChange={(v) => {
-                              const arr = [...(log[s.key] || [])];
+                              const arr = fillRows(log[s.key], i);
                               arr[i] = { ...arr[i], goal: v };
                               updateLog({ [s.key]: arr });
                             }}
@@ -10201,7 +10938,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
                           <Editable
                             value={item.observed}
                             onChange={(v) => {
-                              const arr = [...(log[s.key] || [])];
+                              const arr = fillRows(log[s.key], i);
                               arr[i] = { ...arr[i], observed: v };
                               updateLog({ [s.key]: arr });
                             }}
@@ -10213,7 +10950,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
                             className="rating-select"
                             value={item.rating || ''}
                             onChange={(e) => {
-                              const arr = [...(log[s.key] || [])];
+                              const arr = fillRows(log[s.key], i);
                               arr[i] = { ...arr[i], rating: e.target.value };
                               updateLog({ [s.key]: arr });
                             }}
@@ -10448,7 +11185,14 @@ function ActivityPlan({ ws, setWs }) {
       if (domainKey === 'joinAttention' || domainKey === 'symbolUse') socialGoals.push(goalText);
       else if (domainKey === 'mutualReg' || domainKey === 'selfReg') emoGoals.push(goalText);
     });
-    const partnerGoals = (ws.iep?.partnerGoals || []).filter((p) => p && p.trim());
+    // ★ 파트너 목표는 글자 또는 추천 칩(번호+내용) 두 형태가 섞여 있음 → 둘 다 글자로 바꿔서 가져오기
+    const partnerGoals = (ws.iep?.partnerGoals || []).map((p) => {
+      if (p && typeof p === 'object' && p.id) {
+        const t = (p.customGoal || p.label || '').trim();
+        return t ? `[${p.id}] ${t}` : '';
+      }
+      return typeof p === 'string' ? p.trim() : '';
+    }).filter(Boolean);
 
     // 교수 전략도 함께 가져오기
     const strategies = ws.iep?.strategies || {};
@@ -10944,8 +11688,10 @@ function SesProgressTimeline({ ws }) {
   const sessions = useMemo(() => {
     const list = [...(ws._allSessions || [])];
     list.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-    return list.filter((s) => s.ses && Object.keys(s.ses).length > 0);
-  }, [ws._allSessions]);
+    // ★ 세션마다 문항 점수로 성장 지표를 계산(표 7-5)
+    return list.map((s) => ({ ...s, ses: sesOf(s, ws.meta?.stage) }))
+      .filter((s) => s.ses && Object.keys(s.ses).length > 0);
+  }, [ws._allSessions, ws.meta?.stage]);
 
   if (sessions.length < 2) return null;
 
@@ -11094,8 +11840,9 @@ function SapSummary({ ws }) {
   const sessions = useMemo(() => {
     const list = [...(ws._allSessions || [])];
     list.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-    return list;
-  }, [ws._allSessions]);
+    // ★ 성장 지표는 세션마다 문항 점수로 계산(표 7-5)
+    return list.map((s) => ({ ...s, ses: sesOf(s, ws.meta?.stage) }));
+  }, [ws._allSessions, ws.meta?.stage]);
 
   if (!stageData) {
     return <div className="empty-hint" style={{ padding: 24 }}>단계가 결정되어야 SAP 요약지가 생성됩니다.</div>;
@@ -11117,13 +11864,6 @@ function SapSummary({ ws }) {
     });
     return { session: s, domains: domainScores };
   });
-
-  // 상위 영역 그룹 (SC, ER, TS) 합산
-  const groupScore = (domains, keys) => {
-    const sum = keys.reduce((a, k) => a + (domains[k]?.score || 0), 0);
-    const max = keys.reduce((a, k) => a + (domains[k]?.max || 0), 0);
-    return { sum, max, pct: max ? Math.round((sum/max)*100) : 0 };
-  };
 
   return (
     <div id="printable-report" className="printable">
@@ -11177,13 +11917,6 @@ function SapSummary({ ws }) {
                 </td>
               ))}
             </tr>
-            <tr className="sap-subtotal-row">
-              <td className="sap-area-name"><strong>소계</strong></td>
-              {sessionData.map(({ session, domains }) => {
-                const g = groupScore(domains, ['joinAttention', 'symbolUse']);
-                return <td key={session.id} className="sap-score-cell"><ScoreBlock score={g} bold /></td>;
-              })}
-            </tr>
 
             {/* 정서 조절 그룹 */}
             <tr className="sap-group-row">
@@ -11204,13 +11937,6 @@ function SapSummary({ ws }) {
                   <ScoreBlock score={domains.selfReg} />
                 </td>
               ))}
-            </tr>
-            <tr className="sap-subtotal-row">
-              <td className="sap-area-name"><strong>소계</strong></td>
-              {sessionData.map(({ session, domains }) => {
-                const g = groupScore(domains, ['mutualReg', 'selfReg']);
-                return <td key={session.id} className="sap-score-cell"><ScoreBlock score={g} bold /></td>;
-              })}
             </tr>
 
             {/* 교류 지원 그룹 */}
@@ -11233,22 +11959,8 @@ function SapSummary({ ws }) {
                 </td>
               ))}
             </tr>
-            <tr className="sap-subtotal-row">
-              <td className="sap-area-name"><strong>소계</strong></td>
-              {sessionData.map(({ session, domains }) => {
-                const g = groupScore(domains, ['interpersonalSupport', 'learningSupport']);
-                return <td key={session.id} className="sap-score-cell"><ScoreBlock score={g} bold /></td>;
-              })}
-            </tr>
 
-            {/* 전체 총점 */}
-            <tr className="sap-total-row">
-              <td className="sap-area-name"><strong>전체 총점</strong></td>
-              {sessionData.map(({ session, domains }) => {
-                const g = groupScore(domains, Object.keys(stageData));
-                return <td key={session.id} className="sap-score-cell"><ScoreBlock score={g} bold large /></td>;
-              })}
-            </tr>
+            {/* ★ 소계·전체 총점 줄은 뺐음 — 책(1권 254·265쪽)은 6개 구성 요소 점수만 따로 기록함 */}
           </tbody>
         </table>
       </section>
@@ -11297,7 +12009,7 @@ function SapSummary({ ws }) {
       {/* 가족 우선순위 */}
       <FamilyPrioritiesReport ws={ws} />
 
-      <ApprovalBlock />
+      <ApprovalBlock therapist={ws.meta.therapist} />
     </div>
   );
 }
@@ -11537,7 +12249,7 @@ function FamilySupportForm({ ws, setWs }) {
         </table>
       </section>
 
-      <ApprovalBlock />
+      <ApprovalBlock therapist={ws.meta.therapist} />
     </div>
   );
 }
@@ -11720,7 +12432,7 @@ function ProfSupportForm({ ws, setWs }) {
         </table>
       </section>
 
-      <ApprovalBlock />
+      <ApprovalBlock therapist={ws.meta.therapist} />
     </div>
   );
 }
@@ -11767,7 +12479,7 @@ function DataIntegrityCheck({ ws }) {
           found.push({
             type: 'group_variance',
             severity: 'low',
-            message: `${domain.label} - ${g.label}에서 2점과 0점이 함께 있습니다 (n=${scoresInGroup.length}).`,
+            message: `${domain.label} - ${g.title}에서 2점과 0점이 함께 있습니다 (n=${scoresInGroup.length}).`,
             hint: '같은 그룹 내 점수 편차가 크면 채점 기준 재검토를 권장합니다.',
           });
         }
@@ -12331,7 +13043,7 @@ function CommunicationScheduleForm({ ws, setWs, showToast }) {
         />
       </section>
 
-      <ApprovalBlock />
+      <ApprovalBlock therapist={ws.meta.therapist} />
     </div>
   );
 }
@@ -12696,12 +13408,14 @@ function FbaForm({ ws, setWs, showToast }) {
         </table>
       </section>
 
-      <ApprovalBlock />
+      <ApprovalBlock therapist={ws.meta.therapist} />
     </div>
   );
 }
 
-function ApprovalBlock({ reportDate }) {
+function ApprovalBlock({ reportDate, therapist }) {
+  // ★ 담당 교사 칸은 그 아이의 '치료사' 이름으로 (전에는 모든 보고서에 원장님 이름이 고정)
+  const teacherName = String(therapist || '').trim();
   const dateStr = reportDate
     ? reportDate.replace(/-/g, '. ').replace(/\.\s*$/, '.')
     : '20    .    .    .';
@@ -12728,7 +13442,7 @@ function ApprovalBlock({ reportDate }) {
           </tr>
           <tr>
             <td>담당 교사</td>
-            <td>민 다 혜 (서명)</td>
+            <td>{teacherName ? `${teacherName} (서명)` : '(서명)'}</td>
             <td className="signature-cell">{dateStr}</td>
           </tr>
           <tr>
@@ -12774,7 +13488,11 @@ function Editable({ value, onChange, placeholder, multiline, minLines = 2, examp
                   type="button"
                   key={i}
                   className="ex-item"
-                  onClick={() => { onChange(ex); setShowEx(false); }}
+                  onClick={async () => {
+                    // ★ 이미 쓴 글이 있으면 지우기 전에 먼저 묻는다
+                    if (value && String(value).trim() && !await appConfirm('지금 칸에 쓴 글을 지우고 이 예시로 바꿀까요?')) return;
+                    onChange(ex); setShowEx(false);
+                  }}
                   title="클릭하면 이 문구가 칸에 채워집니다 (이후 수정 가능)"
                 >{ex}</button>
               ))}
@@ -13684,6 +14402,9 @@ body {
   padding: 8px 0;
 }
 .ses-label { font-size: 14px; }
+.ses-row-calc { grid-template-columns: 170px 1fr 150px; }
+.ses-formula { font-size: 12px; color: #6b6b6b; line-height: 1.5; }
+.ses-unscored { color: #b54a3a; }
 .ses-row input[type="range"] {
   accent-color: #2d4a3e;
 }
@@ -14208,6 +14929,7 @@ body {
   margin-bottom: 4px;
 }
 .iq-recovery { display: grid; gap: 12px; }
+.iq-old-text { font-size: 12.5px; color: #6b5320; background: #fef7e6; border: 1px dashed #c19a3a; border-radius: 6px; padding: 7px 10px; margin-bottom: 8px; white-space: pre-wrap; }
 .iq-recovery-block { padding: 0; }
 .iq-recovery-label {
   font-size: 13.5px;
