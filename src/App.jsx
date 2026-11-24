@@ -3861,11 +3861,8 @@ const blankChild = (name = '') => {
       closingReasonDetail: '', // 종결 모드: 사유 상세
       goalAchievement: [],     // 종결 모드: 목표 달성도 [{goal,status,note}]
       recommendation: '',      // 종결 모드: 향후 권고
-      familySuggestions: [
-        '가정 내 감정 단어 노출 및 대화 확장 연습',
-        '시각적 예고 및 감정 온도계 활용한 자기조절 지원',
-        '질문 응답, 이야기 이어 말하기 활동을 통한 언어 사고력 자극',
-      ],
+      // ★ 아이마다 선생님이 직접 쓰도록 빈칸 3줄 (모든 아이에게 같은 문장이 들어가지 않게)
+      familySuggestions: ['', '', ''],
     },
     closing: {
       period: '',           // 치료 시작~종결 기간
@@ -4010,7 +4007,7 @@ function addSampleBookForms(c, partnerIds, startDate, team, activities) {
   // ★ 미리 적어 둔 옛날 형식 문장(백분율·패턴 이름·도달 등급)은 비워 두고, '자동 채움'으로 책 방식 문장이 채워지게 한다
   const blank3 = { sc: '', er: '', ts: '' };
   c.iep = { ...c.iep, currentLevel: { ...blank3 }, annualGoals: { ...blank3 }, shortGoals: { ...blank3 }, strategies: { ...blank3 }, measures: { ...blank3 } };
-  c.interim = { ...c.interim, summary: '', domainSummary: {}, observations: '', direction: '', recommendation: '', goalAchievement: [] };
+  c.interim = { ...c.interim, summary: '', domainSummary: {}, observations: '', direction: '', recommendation: '', goalAchievement: [], familySuggestions: ['', '', ''] };
 }
 
 // ★ 샘플 아동은 책처럼 모든 문항을 채점한 상태로 만든다(진단 요약지는 전 문항 채점이 전제, 1권 265쪽)
@@ -5169,11 +5166,8 @@ const blankWorkspace = () => ({
     closingReasonDetail: '',
     goalAchievement: [],
     recommendation: '',
-    familySuggestions: [
-      '가정 내 감정 단어 노출 및 대화 확장 연습',
-      '시각적 예고 및 감정 온도계 활용한 자기조절 지원',
-      '질문 응답, 이야기 이어 말하기 활동을 통한 언어 사고력 자극',
-    ],
+    // ★ 아이마다 선생님이 직접 쓰도록 빈칸 3줄 (모든 아이에게 같은 문장이 들어가지 않게)
+    familySuggestions: ['', '', ''],
   },
   closing: {
     period: '', reason: '', reasonDetail: '',
@@ -8568,15 +8562,19 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
       });
       return out;
     };
+    // ★ 채운 개수는 지금 화면의 값으로 먼저 센다(저장 처리는 나중에 실행되어 거기서 세면 0으로 나옴)
+    ['currentLevel', 'annualGoals', 'shortGoals', 'strategies', 'measures'].forEach((f) => merge(ws.iep?.[f] || {}, filled[f]));
+    const countMerge = merge;
+    const mergeQuiet = (existing, generated) => { const fc = filledCount, pc = preservedCount; const out = countMerge(existing, generated); filledCount = fc; preservedCount = pc; return out; };
     setWs((s) => ({
       ...s,
       iep: {
         ...s.iep,
-        currentLevel: merge(s.iep.currentLevel || {}, filled.currentLevel),
-        annualGoals: merge(s.iep.annualGoals || {}, filled.annualGoals),
-        shortGoals: merge(s.iep.shortGoals || {}, filled.shortGoals),
-        strategies: merge(s.iep.strategies || {}, filled.strategies),
-        measures: merge(s.iep.measures || {}, filled.measures),
+        currentLevel: mergeQuiet(s.iep.currentLevel || {}, filled.currentLevel),
+        annualGoals: mergeQuiet(s.iep.annualGoals || {}, filled.annualGoals),
+        shortGoals: mergeQuiet(s.iep.shortGoals || {}, filled.shortGoals),
+        strategies: mergeQuiet(s.iep.strategies || {}, filled.strategies),
+        measures: mergeQuiet(s.iep.measures || {}, filled.measures),
       },
     }));
     if (showToast) {
@@ -8900,7 +8898,7 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
       const partnerDomains = compareData.filter((d) => TS_KEYS.includes(d.domain));
       const fmt = (d) => `${d.label} ${d.pre}점→${d.post}점`;
       if (childDomains.length > 0) {
-        summary += `구성 요소별 진단 점수는 사전에서 사후로 ${childDomains.map(fmt).join(', ')}으로 변화하였다. `;
+        summary += `구성 요소별 진단 점수는 사전에서 사후로 ${childDomains.map(fmt).join(', ')}으로 나타났다. `;
       }
       // 가장 진전이 큰 아동 구성 요소 한 가지 강조 (교류 지원은 파트너 점수라 제외)
       const topGains = [...childDomains].filter((d) => d.delta > 0).sort((a, b) => b.delta - a.delta);
@@ -8908,7 +8906,7 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
         summary += `특히 ${topGains[0].label}에서 ${topGains[0].delta}점의 가장 큰 향상이 관찰되었다. `;
       }
       if (partnerDomains.length > 0) {
-        summary += `파트너의 교류 지원은 ${partnerDomains.map(fmt).join(', ')}으로 변화하였다. `;
+        summary += `파트너의 교류 지원은 ${partnerDomains.map(fmt).join(', ')}으로 나타났다. `;
       }
       // ★ 분기 재진단(1권 269쪽): 사전에 상대적 요구였다가 사후에 상대적 강점이 된 장기목표
       const turned = [];
@@ -11566,7 +11564,7 @@ function ActivityPlan({ ws, setWs }) {
     { k: 'time', label: '시간' },
     { k: 'complexity', label: '사회적 복잡성 (비율)' },
     { k: 'group', label: '집단 크기' },
-    { k: 'partners', label: '팀 구성원 및 파트너' },
+    { k: 'partners', label: '파트너' },
   ];
   const groups = [
     { id: 'child', title: '주간 아동 목표' },
