@@ -2245,6 +2245,187 @@ function getEquivalentItems(stage, itemId) {
   return result;
 }
 
+// ── IEP 우선순위 추천 (IEP 화면과 자동 채움·보고서가 같은 목록을 쓴다) ─────
+//   책의 세 기준(기능성·가족 우선순위·발달적 적합성, 2권 33~35쪽)을 돕는 보조 점수.
+//   ★ '=' 같은 문항(1권 부록)은 한 번만 추천하고, 짝 문항 번호를 sameAs에 붙인다
+function computeRecommendedGoals(stageKey, scores, familyPriorities) {
+  const stageData = STAGE_DATA[stageKey];
+  if (!stageData) return [];
+  const sc = scores || {};
+  const weights = IEP_PRIORITY_WEIGHTS;
+  const foundations = FOUNDATION_ITEMS[stageKey] || new Set();
+  const tree = JA_DEVELOPMENT_TREE[stageKey] || {};
+  const familyFocus = new Set(familyPriorities?.focusGoalIds || []);
+  const list = [];
+  Object.entries(stageData).forEach(([dkey, domain]) => {
+    domain.groups.forEach((g) =>
+      g.items.forEach((it) => {
+        const v = sc[it.id];
+        if (v !== 0 && v !== 1) return;
+        // ★ 책 기준(2권 32~35쪽): 가족의 우선순위 → 발달적 적합성
+        //   (연습 중인 1점 → 배우는 중인 0점, 앞 장기목표·앞 교수목표 먼저). 아동 목표를 교류 지원보다 먼저.
+        //   책에 없는 영역별 가중치는 쓰지 않는다.
+        const isFamilyChoice = familyFocus.has(it.id);
+        const isTsItem = dkey === 'interpersonalSupport' || dkey === 'learningSupport';
+        const [gNo, iNo] = it.id.slice(2).split('.').map(Number);
+        const priority = (isTsItem ? 0 : 1000000) + (isFamilyChoice ? 100000 : 0) + (v === 1 ? 10000 : 0) - gNo * 100 - iNo;
+        const prereqsMet = true;
+        list.push({
+          id: it.id, label: it.label, domain: domain.label, domainKey: dkey,
+          groupTitle: (g.title || '').replace(/^\d+\.\s*/, '').replace(/[.。]\s*$/, ''),
+          score: v, priority, isFoundation: foundations.has(it.id), isFamilyChoice, prereqsMet,
+        });
+      }),
+    );
+  });
+  list.sort((a, b) => b.priority - a.priority);
+  // '=' 짝 문항은 우선순위가 높은 쪽 하나만 남긴다
+  const seen = new Set();
+  const out = [];
+  list.forEach((g) => {
+    if (seen.has(g.id)) return;
+    const eq = getEquivalentItems(stageKey, g.id);
+    eq.forEach((e) => seen.add(e));
+    seen.add(g.id);
+    out.push(eq.length ? { ...g, sameAs: eq } : g);
+  });
+  return out;
+}
+
+// ── IEP·보고서 문장용 목표 묶음 ───────────────────────────────────
+//   아동 목표는 선생님이 고른 주간 우선순위 문항을 먼저, 없으면 추천 상위 문항을 쓴다
+//   교류 지원은 파트너 문항(IS/LS) 중 점수가 낮은 것
+const SC_KEYS = ['joinAttention', 'symbolUse'];
+const ER_KEYS = ['mutualReg', 'selfReg'];
+const TS_KEYS_ALL = ['interpersonalSupport', 'learningSupport'];
+// 교류 지원 문항을 영역에 나눠 연결 (책 2권 4장: 교류 지원은 사회 의사소통·정서 조절 목표를 돕는 수단)
+//   사회 의사소통 ← IS2 시작행동 촉진, IS5 발달 지원, IS6 언어 조절, IS7 시범, LS2.1·LS2.2 보완의사소통
+//   정서 조절 ← IS1 반응성, IS3 독립성 존중, LS2.3·LS2.4 정서 지원, LS3 시각/조직화, LS4 수정
+const TS_FOR_SC = /^(IS2|IS5|IS6|IS7)\.|^LS2\.[12]$|^LS1\.2$/;
+const TS_FOR_ER = /^(IS1|IS3)\.|^LS2\.[34]$|^LS3\.|^LS4\./;
+function itemLookup(stageKey) {
+  const m = {};
+  Object.entries(STAGE_DATA[stageKey] || {}).forEach(([dkey, domain]) => domain.groups.forEach((g) => g.items.forEach((it) => {
+    m[it.id] = { id: it.id, label: it.label, domainKey: dkey, groupTitle: (g.title || '').replace(/^\d+\.\s*/, '').replace(/[.。]\s*$/, '') };
+  })));
+  return m;
+}
+// ★ 책 2권 4장 「목표 간 연계」(162~287쪽)의 연결표: 아동 장기목표 → 관련된 파트너 교류 지원 교수목표
+//   (책이 표로 제시한 장기목표만 있음. 없는 장기목표는 영역별 묶음으로 고른다)
+const TS_LINKS = {
+  social: {
+    JA1: ['IS1.1', 'IS1.6', 'IS2.1', 'IS2.2', 'LS1.2', 'LS1.3', 'LS4.5'],
+    JA3: ['IS1.2', 'IS2.2', 'IS6.1', 'IS7.1', 'LS2.3', 'LS4.6'],
+    JA4: ['IS1.3', 'IS2.1', 'IS3.4', 'IS7.2', 'LS2.1', 'LS4.5'],
+    JA5: ['IS1.6', 'IS2.3', 'IS7.2', 'LS1.2', 'LS2.1', 'LS4.5'],
+    JA6: ['IS1.6', 'IS2.2', 'IS4.3', 'IS7.2', 'LS1.5', 'LS4.5', 'LS4.7'],
+    SU3: ['IS5.1', 'IS5.5', 'IS7.3', 'LS1.3', 'LS1.4', 'LS4.6'],
+    SU4: ['IS5.5', 'IS7.1', 'IS7.4', 'LS2.1', 'LS4.5', 'LS4.10'],
+    SU5: ['IS1.3', 'IS1.6', 'IS5.1', 'LS1.2', 'LS1.4'],
+    SU6: ['IS4.2', 'IS6.1', 'IS6.2', 'LS2.2', 'LS3.6'],
+    MR1: ['IS4.3', 'IS5.5', 'IS7.1', 'LS1.5', 'LS2.3', 'LS4.4'],
+    MR3: ['IS1.3', 'IS2.2', 'IS5.5', 'IS7.1', 'LS1.4', 'LS2.1', 'LS2.3', 'LS4.10'],
+    MR4: ['IS1.5', 'IS3.4', 'IS7.1', 'LS2.3', 'LS3.6', 'LS4.3'],
+    SR1: ['IS1.3', 'IS1.5', 'IS4.2', 'LS1.1', 'LS1.4', 'LS3.3'],
+    SR3: ['IS1.7', 'IS2.4', 'IS4.4', 'LS1.5', 'LS2.4', 'LS3.4'],
+    SR4: ['IS1.4', 'IS3.4', 'IS7.1', 'LS2.3', 'LS3.6', 'LS4.3'],
+  },
+  language: {
+    JA1: ['IS1.3', 'IS2.2', 'IS2.3', 'LS1.2', 'LS4.5', 'LS4.8'],
+    JA3: ['IS1.2', 'IS2.2', 'IS6.1', 'IS7.1', 'LS2.3', 'LS4.1'],
+    JA4: ['IS1.3', 'IS2.1', 'IS2.4', 'IS3.4', 'IS7.2', 'LS2.1', 'LS4.5'],
+    JA5: ['IS1.3', 'IS2.3', 'IS7.2', 'LS1.2', 'LS3.6', 'LS4.5'],
+    JA6: ['IS1.1', 'IS2.2', 'IS4.3', 'IS7.2', 'LS1.5', 'LS2.1', 'LS4.7'],
+    JA8: ['IS1.3', 'IS2.2', 'IS2.3', 'LS1.2', 'LS2.1', 'LS3.6', 'LS4.8'],
+    SU1: ['IS1.6', 'IS2.3', 'IS4.3', 'IS5.1', 'LS1.4', 'LS3.1', 'LS4.6'],
+    SU3: ['IS5.1', 'IS7.3', 'LS1.3', 'LS2.2', 'LS4.6'],
+    SU5: ['IS1.3', 'IS6.2', 'IS7.5', 'LS2.1', 'LS4.5', 'LS4.10'],
+    SU6: ['IS4.2', 'IS6.1', 'IS6.2', 'LS1.4', 'LS2.2', 'LS4.6'],
+    MR1: ['IS1.2', 'IS2.2', 'IS5.5', 'IS7.1', 'LS1.5', 'LS2.3', 'LS4.4'],
+    MR3: ['IS2.2', 'IS4.3', 'IS7.1', 'IS7.5', 'LS1.4', 'LS2.3', 'LS2.4', 'LS4.5'],
+    MR4: ['IS1.5', 'IS3.4', 'IS6.3', 'IS7.1', 'LS2.2', 'LS2.3', 'LS4.3'],
+    SR1: ['IS1.2', 'IS4.4', 'IS5.5', 'LS1.3', 'LS1.4', 'LS2.2', 'LS4.6'],
+    SR3: ['IS3.3', 'IS6.3', 'IS7.1', 'LS1.4', 'LS2.3', 'LS4.1'],
+    SR4: ['IS4.3', 'IS5.4', 'IS7.5', 'LS3.3', 'LS4.4', 'LS4.9'],
+    SR5: ['IS1.5', 'IS1.7', 'IS3.1', 'IS7.5', 'LS2.4', 'LS3.6', 'LS4.3'],
+  },
+  conversation: {
+    JA1: ['IS4.2', 'IS4.4', 'LS2.2', 'LS4.4'],
+    JA3: ['IS1.3', 'IS2.3', 'IS7.2', 'LS2.1', 'LS4.8'],
+    JA4: ['IS1.3', 'IS2.3', 'IS5.1', 'IS7.2', 'LS1.2', 'LS2.1', 'LS3.6', 'LS4.1'],
+    JA5: ['IS4.4', 'IS5.2', 'IS5.5', 'LS3.6', 'LS4.1'],
+    SU1: ['IS5.3', 'IS7.4', 'IS7.5', 'LS1.3', 'LS2.2', 'LS3.6', 'LS4.1'],
+    SU2: ['IS4.3', 'IS4.4', 'IS7.1', 'LS1.5', 'LS2.2', 'LS4.6'],
+    SU5: ['IS6.2', 'IS7.5', 'LS2.1', 'LS4.2'],
+    SU6: ['IS5.3', 'IS7.2', 'IS7.4', 'LS2.1', 'LS3.6', 'LS4.8'],
+    MR1: ['IS4.4', 'IS5.2', 'IS7.1', 'LS1.5', 'LS2.3', 'LS2.4'],
+    MR3: ['IS1.6', 'IS5.1', 'IS5.4', 'IS5.5', 'LS2.2', 'LS4.4', 'LS4.10'],
+    MR4: ['IS2.2', 'IS3.3', 'IS7.2', 'LS2.1', 'LS2.3', 'LS4.5'],
+    MR5: ['IS1.5', 'IS3.4', 'IS6.3', 'IS7.1', 'LS2.2', 'LS2.3', 'LS4.3'],
+    SR1: ['IS4.2', 'IS5.1', 'IS7.1', 'LS1.5', 'LS3.2', 'LS4.6'],
+    SR3: ['IS1.3', 'IS5.3', 'IS7.5', 'LS1.3', 'LS2.3', 'LS4.10'],
+    SR4: ['IS1.6', 'IS4.4', 'IS5.4', 'IS7.5', 'LS1.1', 'LS2.4', 'LS3.2'],
+    SR6: ['IS1.2', 'IS1.4', 'IS3.4', 'IS7.5', 'LS2.4', 'LS3.6', 'LS4.3'],
+  },
+};
+function buildGoalPlan(stageKey, scores, familyPriorities, iep) {
+  const rec = computeRecommendedGoals(stageKey, scores, familyPriorities);
+  const lookup = itemLookup(stageKey);
+  const sc = scores || {};
+  const pick = (keys, n) => {
+    const chosen = (iep?.selectedGoals || [])
+      .map((g) => lookup[g.id] ? { ...lookup[g.id], label: (g.customGoal || '').trim() || lookup[g.id].label, score: sc[g.id], custom: g.customGoal } : null)
+      .filter((g) => g && keys.includes(g.domainKey));
+    if (chosen.length > 0) return chosen.slice(0, 8);   // ★ 선생님이 고른 목표는 모두 (책: 사회 의사소통+정서 조절 4~8개, 1권 266쪽)
+    return rec.filter((g) => keys.includes(g.domainKey)).slice(0, n);
+  };
+  // 파트너 목표: 선생님이 고른 파트너 목표 → 없으면 점수 낮은 IS/LS
+  // ★ 파트너 목표는 칩(번호 있음), "[IS1.2] 글자", 직접 쓴 글자 세 가지가 섞여 있다 → 모두 목표로 쓴다
+  const partnerChosen = (iep?.partnerGoals || []).map((p) => {
+    if (p && typeof p === 'object' && p.id) return lookup[p.id] ? { ...lookup[p.id], score: sc[p.id] } : { id: p.id, label: (p.customGoal || p.label || '').trim(), groupTitle: '' };
+    const t = typeof p === 'string' ? p.trim() : '';
+    if (!t) return null;
+    const m = t.match(/^\[([A-Z]{2}\d+\.\d+)\]\s*(.*)$/);
+    if (m && lookup[m[1]]) return { ...lookup[m[1]], score: sc[m[1]] };
+    return { id: m ? m[1] : '', label: m ? m[2] : t, groupTitle: '' };
+  }).filter((g) => g && (g.id || g.label));
+  const tsLow = rec.filter((g) => TS_KEYS_ALL.includes(g.domainKey));
+  const scGoals = pick(SC_KEYS, 2);
+  const erGoals = pick(ER_KEYS, 2);
+  // 아동 목표의 장기목표(JA5.1 → JA5)에 책 연결표가 있으면 그 교류 지원을, 없으면 영역 묶음에서 점수 낮은 것을
+  //   아직 일관되지 않은(0·1점 또는 미채점) 지원을 앞에 둔다
+  const supportsFor = (goals, re) => {
+    const links = TS_LINKS[stageKey] || {};
+    const ids = [];
+    goals.forEach((g) => (links[g.id.replace(/\.\d+$/, '')] || []).forEach((id) => { if (lookup[id] && !ids.includes(id)) ids.push(id); }));
+    if (ids.length === 0) return tsLow.filter((g) => re.test(g.id)).slice(0, 3);
+    const rank = (id) => (sc[id] === 0 ? 0 : sc[id] === 1 ? 1 : typeof sc[id] !== 'number' ? 2 : 3);
+    return ids.map((id) => ({ ...lookup[id], score: sc[id] })).sort((a, b) => rank(a.id) - rank(b.id)).slice(0, 3);
+  };
+  const scSupports = supportsFor(scGoals, TS_FOR_SC);
+  const erSupports = supportsFor(erGoals, TS_FOR_ER);
+  // 파트너 단기목표: 선생님이 고른 것 → 없으면 연결된 지원 중 0·1점인 것 → 없으면 점수 낮은 교류 지원
+  // ★ 책 1권 266쪽: 교류 지원 주간 목표 4~8개, 아동 목표마다 그 행동을 돕는 교류 지원이 최소 1개
+  //   ① 아동 목표마다 연결표에서 아직 일관되지 않은(0·1점) 지원 1개 → ② 연결된 다른 0·1점 지원 → ③ 점수 낮은 교류 지원으로 4개까지
+  const isLow = (id) => sc[id] === 0 || sc[id] === 1;
+  const lowRank = (id) => (sc[id] === 0 ? 0 : 1);
+  const linksOf = (g) => ((TS_LINKS[stageKey] || {})[g.id.replace(/\.\d+$/, '')] || []).filter((id) => lookup[id] && isLow(id)).sort((a, b) => lowRank(a) - lowRank(b));
+  const tsIds = [];
+  const add = (id) => { if (id && !tsIds.includes(id) && tsIds.length < 8) tsIds.push(id); };
+  [...scGoals, ...erGoals].forEach((g) => { const l = linksOf(g); if (!l.some((id) => tsIds.includes(id))) add(l[0]); });
+  [...scGoals, ...erGoals].forEach((g) => linksOf(g).forEach((id) => { if (tsIds.length < 4) add(id); }));
+  [...scSupports, ...erSupports].forEach((g) => { if (tsIds.length < 4 && isLow(g.id)) add(g.id); });
+  tsLow.forEach((g) => { if (tsIds.length < 4) add(g.id); });
+  const ts = partnerChosen.length ? partnerChosen.slice(0, 8) : tsIds.map((id) => ({ ...lookup[id], score: sc[id] }));
+  // 이미 잘 되는 교류 지원(2점) — 종결 권고에서 '다음 파트너에게 전할 지원'
+  const tsStrong = Object.entries(sc).filter(([id, v]) => v === 2 && lookup[id] && TS_KEYS_ALL.includes(lookup[id].domainKey))
+    .map(([id]) => lookup[id]).slice(0, 3);
+  return { sc: scGoals, er: erGoals, ts, scSupports, erSupports, tsStrong, lookup };
+}
+// "SU5.1 「소리/단어를 …」" 형태
+const goalRef = (g) => (g.id ? `${g.id} 「${g.label}」` : `「${g.label}」`);
+const uniqTitles = (arr) => [...new Set(arr.map((g) => g.groupTitle).filter(Boolean))];
+
 // ── MR ↔ SR 다리 놓기 전략 ──────────────────────────────────────
 // 상호조절(타인이 도와줌)에서 자기조절(스스로)로 가는 발달 다리
 const MR_SR_BRIDGE = {
@@ -2301,7 +2482,8 @@ const MR_SR_BRIDGE = {
   },
 };
 
-// ── IEP 목표 우선순위 알고리즘 가중치 ────────────────────────────
+// ── (예전) IEP 목표 우선순위 가중치 — 지금 추천 순서는 computeRecommendedGoals의 책 기준(가족 우선 → 1점 → 0점 → 앞 장기목표)을 쓰고,
+//    아래 가중치는 쓰지 않는다. 다른 화면 호환을 위해 남겨 둠 ────────────────────────────
 // SCERTS 매뉴얼(2권 제1장 5절, 책 p.32)은 교수목표 결정에 세 가지 주요 기준을 적용:
 //   ① 기능성    — 이 기술이 아동의 삶에 가져올 변화 (앱: 점수 0~1 항목 우선, scoreBoost)
 //   ② 가족의 우선순위 — 가족의 가치관·희망과 일치 (앱: familyChoiceBoost, 최대 가중치)
@@ -3357,19 +3539,19 @@ const ACTIVITY_LOG_I = {
       title: '아동의 사회 의사소통 목표',
       type: 'goals',
       rows: 6,
-      cols: ['목표', '관찰된 행동/예', '도달 여부 (-, +/-, +)'],
+      cols: ['목표', '유의점: 활동 중 보인 최상의 행동', '+ 표시 (시작·올바른 반응마다)'],
     },
     {
       title: '아동의 정서 조절 목표',
       type: 'goals',
       rows: 4,
-      cols: ['목표', '관찰된 행동/예', '도달 여부 (-, +/-, +)'],
+      cols: ['목표', '유의점: 활동 중 보인 최상의 행동', '+ 표시 (시작·올바른 반응마다)'],
     },
     {
       title: '파트너의 교류 지원 목표',
       type: 'goals',
       rows: 6,
-      cols: ['목표', '사용한 전략/예', '효과 (-, +/-, +)'],
+      cols: ['목표', '유의점: 파트너가 제공한 지원', '+ 표시 (제공할 때마다)'],
     },
     {
       title: '활동 후 관찰 메모',
@@ -3790,6 +3972,73 @@ const blankChild = (name = '') => {
 // =====================================================================
 // 샘플 아동 — 기능 확인용 (민준호, 언어 파트너 단계, 모든 데이터 채움)
 // =====================================================================
+// ★ 종결보고서 목표 달성도 = 책의 0·1·2점 채점 기준 말 그대로(1권 8장 채점 기준)
+const ACHIEVE_LABEL = { 2: '일관성 있게 도달(2)', 1: '일관성 없이 도달(1)', 0: '도달하지 못함(0)' };
+
+// ★ 샘플 아동에 책 양식(파트너 목표·주간 기록지·활동 계획서) 예시를 채운다
+function addSampleBookForms(c, partnerIds, startDate, team, activities) {
+  const lookup = itemLookup(c.meta?.stage);
+  c.iep.partnerGoals = partnerIds.filter((id) => lookup[id]).map((id) => ({ id, label: lookup[id].label }));
+  const keys = [...(c.iep.selectedGoals || []).map((g) => g.id), ...c.iep.partnerGoals.map((g) => g.id)];
+  const nWeeks = 6;
+  const d0 = new Date(startDate + 'T00:00:00');
+  const startDates = Array.from({ length: 12 }, (_, i) => {
+    if (i >= nWeeks) return '';
+    const d = new Date(d0.getTime() + i * 7 * 86400000);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  // 주간 점수는 사전 진단 점수에서 시작해 사후 진단 점수로 끝나게 한다(보고서와 서로 맞도록)
+  const pre = (c.sessions || []).find((x) => x.designation === 'pre')?.scores || {};
+  const post = (c.sessions || []).find((x) => x.designation === 'post')?.scores || {};
+  // 샘플에서 고른 목표는 사전에 아직 일관되지 않았던(0·1점) 목표로 맞추고, 대부분 사후에 1점씩 오르게 한다
+  keys.forEach((k, i) => {
+    if (typeof pre[k] !== 'number' || pre[k] === 2) pre[k] = 1;
+    if (typeof post[k] !== 'number' || post[k] < pre[k]) post[k] = pre[k];
+    if (i % 4 !== 3 && post[k] === pre[k]) post[k] = Math.min(2, pre[k] + 1);
+  });
+  const scores = {};
+  keys.forEach((k, i) => {
+    const a0 = typeof pre[k] === 'number' ? pre[k] : 0;
+    const b0 = typeof post[k] === 'number' ? post[k] : a0;
+    const turn = 2 + (i % 3);   // 바뀌는 주를 목표마다 조금씩 다르게
+    scores[k] = [...Array.from({ length: nWeeks }, (_, w) => (w < turn ? a0 : b0)), ...Array(12 - nWeeks).fill(null)];
+  });
+  c.activities.weeklyScores = { startDates, scores };
+  const checks = {};
+  keys.forEach((k, i) => { checks[k] = Array.from({ length: 6 }, (_, j) => j < activities.length && (j === i % activities.length || j === (i + 1) % activities.length)); });
+  c.activities.plan = { ...(c.activities.plan || {}), book: { team, cols: activities.map((a) => ({ ...a })), checks } };
+  // ★ 미리 적어 둔 옛날 형식 문장(백분율·패턴 이름·도달 등급)은 비워 두고, '자동 채움'으로 책 방식 문장이 채워지게 한다
+  const blank3 = { sc: '', er: '', ts: '' };
+  c.iep = { ...c.iep, currentLevel: { ...blank3 }, annualGoals: { ...blank3 }, shortGoals: { ...blank3 }, strategies: { ...blank3 }, measures: { ...blank3 } };
+  c.interim = { ...c.interim, summary: '', domainSummary: {}, observations: '', direction: '', recommendation: '', goalAchievement: [] };
+}
+
+// ★ 샘플 아동은 책처럼 모든 문항을 채점한 상태로 만든다(진단 요약지는 전 문항 채점이 전제, 1권 265쪽)
+//   미리 적어 둔 점수는 그대로 두고, 빈 문항은 같은 장기목표에서 가장 낮은 점수보다 1점 낮게(최소 0점) 채운다
+//   (장기목표 안 문항을 하나도 적지 않았으면 아동 목표는 0점, 교류 지원은 1점). 사후 점수는 사전보다 낮지 않게.
+function completeSampleScores(c) {
+  const data = STAGE_DATA[c.meta?.stage];
+  if (!data || !Array.isArray(c.sessions)) return;
+  const fill = (scores, floor) => {
+    const out = { ...scores };
+    Object.entries(data).forEach(([key, d]) => {
+      const isTs = key === 'interpersonalSupport' || key === 'learningSupport';
+      d.groups.forEach((g) => {
+        const given = g.items.map((it) => scores[it.id]).filter((v) => typeof v === 'number');
+        const base = given.length ? Math.max(0, Math.min(...given) - 1) : (isTs ? 1 : 0);
+        g.items.forEach((it) => {
+          if (typeof out[it.id] !== 'number') out[it.id] = Math.max(base, floor?.[it.id] ?? 0);
+        });
+      });
+    });
+    return out;
+  };
+  const pre = c.sessions.find((x) => x.designation === 'pre');
+  const post = c.sessions.find((x) => x.designation === 'post');
+  if (pre) pre.scores = fill(pre.scores || {}, null);
+  if (post) post.scores = fill(post.scores || {}, pre?.scores);
+}
+
 function makeSampleChild() {
   const c = blankChild('민준호');
   c.meta.birthDate = '2022-04-15';
@@ -3889,15 +4138,15 @@ function makeSampleChild() {
   // 5) 활동 일지 (회기 기록)
   c.activities.logI = [
     { id: 'log1', date: '2026-03-12', fields: { activity: '블록 쌓기 놀이' },
-      goalsSocial: [{ goal: '차례 주고받기', observed: '블록을 가리키며 "더 줘"라고 요청', rating: '독립 수행' }],
+      goalsSocial: [{ goal: '[JA5.3] 차례 주고받기', observed: '블록을 가리키며 "더 줘"라고 요청하고 교사와 번갈아 쌓음', rating: '+ + +' }],
       goalsEmo: [], notes: '활동 시작 시 집중도가 높았고 차례 주고받기 3회 성공' },
     { id: 'log2', date: '2026-03-19', fields: { activity: '그림책 함께 보기' },
-      goalsSocial: [{ goal: '사물 명명', observed: '그림을 보고 "강아지", "공"이라고 명명', rating: '부분 보조' }],
-      goalsEmo: [{ goal: '기다리기', observed: '책장을 넘기고 싶을 때 떼쓰지 않고 기다림', rating: '언어 촉진' }],
+      goalsSocial: [{ goal: '[SU5.3] 초기 관계어 사용하기', observed: '그림을 보고 "강아지 없어", "공 또"라고 말함', rating: '+ +' }],
+      goalsEmo: [{ goal: '[SR3.1] 혼자 하는 활동 중 언어 전략 사용하기', observed: '책장을 넘기고 싶을 때 "기다려"라고 혼잣말하며 기다림', rating: '+' }],
       notes: '' },
     { id: 'log3', date: '2026-03-26', fields: { activity: '자동차 역할놀이' },
       goalsSocial: [],
-      goalsEmo: [{ goal: '진정하기', observed: '자동차를 뺏기자 화났지만 교사가 감정을 말로 짚어주자 진정', rating: '파트너 도움' }],
+      goalsEmo: [{ goal: '[SR3.1] 혼자 하는 활동 중 언어 전략 사용하기', observed: '자동차를 뺏기자 화났지만 "내 차"라고 말한 뒤 교사가 감정을 짚어 주자 진정', rating: '+' }],
       notes: '전환 시점에 시각 일정표 제시하니 저항이 줄어듦' },
   ];
 
@@ -4079,8 +4328,8 @@ function makeSampleChild() {
   c.iep.selectedGoals = [
     { id: 'JA5.3', label: '차례 주고받기', domain: 'joinAttention', customGoal: '' },
     { id: 'JA8.1', label: '경험 공유를 위해 관심/정서/의도 조절하기', domain: 'joinAttention', customGoal: '' },
-    { id: 'SU5.1', label: '관계어·서술어 사용하기', domain: 'symbolUse', customGoal: '' },
-    { id: 'SR3.1', label: '언어 전략을 통한 자기조절', domain: 'selfReg', customGoal: '' },
+    { id: 'SU5.3', label: '초기 관계어 사용하기', domain: 'symbolUse', customGoal: '' },
+    { id: 'SR3.1', label: '혼자 하는 활동 중 언어 전략 사용하기', domain: 'selfReg', customGoal: '' },
   ];
 
   // 7) 중간보고서 — 미리 채움 (STEP5는 사전/사후로 이미 완료, 내용도 채워둠)
@@ -4091,6 +4340,13 @@ function makeSampleChild() {
   c.interim.observations = '회기별 활동 일지 3건 중 주요 관찰 사례는 다음과 같다.\n\n▸ 2026-03-12 - 블록 쌓기 놀이\n  · 블록을 가리키며 "더 줘"라고 요청 (독립 수행)\n  메모: 활동 시작 시 집중도가 높았고 차례 주고받기 3회 성공\n\n▸ 2026-03-19 - 그림책 함께 보기\n  · 그림을 보고 "강아지", "공"이라고 명명 (부분 보조)\n\n▸ 2026-03-26 - 자동차 역할놀이\n  · 자동차를 뺏기자 화났지만 교사가 감정을 말로 짚어주자 진정 (파트너 도움)';
   c.interim.direction = '정서 조절 영역의 현재 프로파일은 상호조절 44%, 자기조절 32%로 "조절 토대 형성 필요" 패턴에 해당한다.\n\n상호조절과 자기조절 모두 절반 미만으로 상대적 요구에 해당한다. 두 능력은 발달 내내 서로 의존하므로 함께 지원한다.\n\n다음 기간에는 다음 전략을 중점적으로 적용한다.\n1. 파트너의 반응성·예측가능성 확보 (IS1 영역 강조)\n2. 준호가 좋아하는 감각 자극이나 활동으로 진정·각성 조절 시범\n3. 간단한 신호(예: 그림 카드)로 도움 요청을 가르치기\n4. 파트너 지원과 함께 준호가 혼자서 할 수 있는 자기조절 행동 전략도 연습';
 
+  completeSampleScores(c);
+  addSampleBookForms(c, ['IS2.3', 'LS1.2', 'IS6.2', 'LS2.3'], '2026-03-09', '교사(T), 엄마(M), 어린이집 교사(D)', [
+    { name: '등원 인사', time: '9:30', complexity: '1:1', group: '2명', partners: 'T', ts: '인사 그림 카드' },
+    { name: '블록 놀이', time: '10:00', complexity: '1:1', group: '2명', partners: 'T', ts: '차례 카드' },
+    { name: '그림책 보기', time: '10:30', complexity: '1:2', group: '3명', partners: 'T', ts: '단어 조합 시범' },
+    { name: '간식', time: '11:00', complexity: '1:3', group: '4명', partners: 'D', ts: '그림 선택판' },
+  ]);
   return c;
 }
 
@@ -4184,11 +4440,11 @@ function makeSampleChildSP() {
 
   c.activities.logI = [
     { id: 'log1', date: '2026-03-05', fields: { activity: '비눗방울 놀이' },
-      goalsSocial: [{ goal: '시선 맞추기', observed: '비눗방울을 더 원할 때 엄마와 눈맞춤 3회', rating: '부분 보조' }],
+      goalsSocial: [{ goal: '[JA2.2] 사람과 사물 간에 시선 옮기기', observed: '비눗방울을 더 원할 때 비눗방울과 엄마를 번갈아 봄', rating: '+ + +' }],
       goalsEmo: [], notes: '5초간 시선 유지 가능' },
     { id: 'log2', date: '2026-03-12', fields: { activity: '까꿍 놀이' },
-      goalsSocial: [{ goal: '주고받기', observed: '"까꿍" 발성에 미소로 반응', rating: '독립 수행' }],
-      goalsEmo: [{ goal: '기다리기', observed: '엄마가 잠시 멈추자 발성으로 요청', rating: '언어 촉진' }],
+      goalsSocial: [{ goal: '[SU5.1] 차별화된 발성 사용하기', observed: '엄마가 잠시 멈추자 "아-" 발성으로 다시 하자고 요청', rating: '+ +' }],
+      goalsEmo: [{ goal: '[MR2.1] 파트너의 위로에 진정하기', observed: '까꿍 소리에 놀라 울었으나 엄마가 안아 주자 1분 안에 진정', rating: '+' }],
       notes: '' },
   ];
 
@@ -4220,10 +4476,10 @@ function makeSampleChildSP() {
     ts: '시각 일정표 사용 여부와 효과를 주 1회 점검.',
   };
   c.iep.selectedGoals = [
-    { id: 'JA1.1', label: '가리키기', domain: 'joinAttention', customGoal: '' },
-    { id: 'JA4.1', label: '시선 공유', domain: 'joinAttention', customGoal: '' },
-    { id: 'SU2.1', label: '발성으로 표현하기', domain: 'symbolUse', customGoal: '' },
-    { id: 'MR1.1', label: '파트너의 위로 수용', domain: 'mutualReg', customGoal: '' },
+    { id: 'JA2.2', label: '사람과 사물 간에 시선 옮기기', domain: 'joinAttention', customGoal: '' },
+    { id: 'JA2.3', label: '짚어서 가리키는 것을 쳐다보기', domain: 'joinAttention', customGoal: '' },
+    { id: 'SU5.1', label: '차별화된 발성 사용하기', domain: 'symbolUse', customGoal: '' },
+    { id: 'MR2.1', label: '파트너의 위로에 진정하기', domain: 'mutualReg', customGoal: '' },
   ];
 
   c.interim.reportType = 'interim';
@@ -4377,6 +4633,13 @@ function makeSampleChildSP() {
     monitoringPlan: '주 1회 ABC 기록(가정·어린이집 각 1건), 월 1회 빈도·강도 그래프 작성.',
   };
 
+  completeSampleScores(c);
+  addSampleBookForms(c, ['IS1.3', 'IS1.6', 'IS5.1', 'LS1.4'], '2026-03-02', '엄마(M), 치료사(T)', [
+    { name: '비눗방울 놀이', time: '10:00', complexity: '1:1', group: '2명', partners: 'M', ts: '빈 통 건네기 기다리기' },
+    { name: '까꿍 놀이', time: '10:20', complexity: '1:1', group: '2명', partners: 'M', ts: '멈추고 기다리기' },
+    { name: '노래 율동', time: '10:40', complexity: '1:1', group: '2명', partners: 'T', ts: '동작 모방' },
+    { name: '옷 입기', time: '11:00', complexity: '1:1', group: '2명', partners: 'M', ts: '사물 일정표' },
+  ]);
   return c;
 }
 
@@ -4463,11 +4726,11 @@ function makeSampleChildCP() {
 
   c.activities.logI = [
     { id: 'log1', date: '2026-03-10', fields: { activity: '협력 보드게임' },
-      goalsSocial: [{ goal: '차례 협상', observed: '"내 차례야"라고 말로 표현, 친구 차례 기다리기 4회 성공', rating: '독립 수행' }],
-      goalsEmo: [{ goal: '져도 진정 유지', observed: '게임에서 졌을 때 잠시 한숨 쉬고 "다시 하자"고 제안', rating: '부분 보조' }],
+      goalsSocial: [{ goal: '[JA4.1] 청자/화자 역할 바꾸며 상호작용하기', observed: '"내 차례야"라고 말하고 친구 차례를 기다림', rating: '+ + + +' }],
+      goalsEmo: [{ goal: '[SR5.2] 새/변화 상황에서 언어 전략 사용하기', observed: '처음 해 보는 게임에서 졌을 때 "괜찮아, 다시 하자"고 말함', rating: '+' }],
       notes: '' },
     { id: 'log2', date: '2026-03-17', fields: { activity: '주제 대화 (좋아하는 영화)' },
-      goalsSocial: [{ goal: '주제 유지', observed: '상대 의견 듣고 5회 차례 주고받기', rating: '언어 촉진' }],
+      goalsSocial: [{ goal: '[JA4.3] 파트너 관심에 맞게 대화 시작/유지하기', observed: '친구가 좋아하는 영화로 주제를 바꿔 5번 주고받음', rating: '+ + + + +' }],
       goalsEmo: [], notes: '관심 외 주제로도 1분간 대화 가능' },
   ];
 
@@ -4501,8 +4764,8 @@ function makeSampleChildCP() {
   c.iep.selectedGoals = [
     { id: 'JA4.1', label: '청자/화자 역할 바꾸며 상호작용하기', domain: 'joinAttention', customGoal: '' },
     { id: 'JA4.3', label: '파트너 관심에 맞게 대화 시작/유지하기', domain: 'joinAttention', customGoal: '' },
-    { id: 'SR3.1', label: '자기조절 전략 자발적 사용', domain: 'selfReg', customGoal: '' },
-    { id: 'SR4.1', label: '예상치 못한 상황 대처', domain: 'selfReg', customGoal: '' },
+    { id: 'SR5.1', label: '새/변화 상황에서 행동 전략 사용하기', domain: 'selfReg', customGoal: '' },
+    { id: 'SR5.2', label: '새/변화 상황에서 언어 전략 사용하기', domain: 'selfReg', customGoal: '' },
   ];
 
   c.interim.reportType = 'interim';
@@ -4658,6 +4921,13 @@ function makeSampleChildCP() {
     monitoringPlan: '주 1회 ABC 기록(가정·학교 각 1건), 월 1회 빈도·자발 사용률 그래프 작성.',
   };
 
+  completeSampleScores(c);
+  addSampleBookForms(c, ['IS2.3', 'IS5.1', 'LS3.6', 'IS3.4'], '2026-03-09', '담임(T), 특수교사(S), 엄마(M), 누나(N)', [
+    { name: '아침 모임', time: '9:00', complexity: '1:20', group: '21명', partners: 'T', ts: '모임 순서표' },
+    { name: '보드게임', time: '10:40', complexity: '1:3', group: '4명', partners: 'S', ts: '갈등 해결 단계 카드' },
+    { name: '점심시간', time: '12:00', complexity: '1:20', group: '21명', partners: 'T', ts: '대화 주제 카드' },
+    { name: '집 놀이', time: '17:00', complexity: '1:2', group: '3명', partners: 'M, N', ts: '자기조절 카드' },
+  ]);
   return c;
 }
 
@@ -6413,7 +6683,7 @@ function HelpGuide({ onClose, compact }) {
 
         <div className="help-step">
           <div className="help-step-head"><b>STEP 5. 활동 기록</b> <span className="help-badge badge-teacher">🩺 선생님 작성</span></div>
-          <p>선생님이 회기별 일지를 작성합니다. 각 회기마다 활동·목표별 관찰·평가 등급(독립/부분 보조/언어 촉진 등)을 기록합니다. 이 기록은 중간·종결보고서에 자동 인용됩니다.</p>
+          <p>선생님이 활동 일지에 목표별 유의점(시작행동·올바른 반응마다 + 표시, 또는 가장 잘한 행동)을 기록하고, 그 기록으로 주간 기록지에 목표별 0·1·2점을 매깁니다. 활동 계획서에는 하루 활동마다 다룰 목표를 표시합니다(책 1권 267~268쪽). 이 기록은 중간·종결보고서에 인용됩니다.</p>
         </div>
 
         <div className="help-step">
@@ -7448,68 +7718,21 @@ function AssessScoreView({
   ws, setWs, stageData, domain, domainTotals, activeDomain, setActiveDomain,
   updateScore, tree, showToast,
 }) {
-  // 회기 일지 기반 진단 점수 제안 (역방향 자동 연계)
+  // ★ 주간 기록지 기반 진단 점수 제안 — 책: 분기별 재진단은 주간 기록지·새 관찰·행동 표집 정보로 갱신(1권 269쪽)
+  //   진단 날짜 이전에 기록한 주만 보고, 2주 이상 기록된 목표에 '가장 최근 주 점수'를 제안한다(적용은 선생님이)
   const suggestions = useMemo(() => {
-    const logs = ws.activities?.logI || [];
-    if (logs.length === 0) return {};
-
-    // 활성 세션 날짜 이후의 회기는 제외 (사후 진단 채점할 때 사전 회기만 반영)
     const sessionDate = (ws._allSessions || []).find((s) => s.id === ws._sessionId)?.date;
-    const relevantLogs = sessionDate
-      ? logs.filter((l) => !l.date || l.date <= sessionDate)
-      : logs;
-
-    // 항목 ID별 평가 집계
-    const itemRatings = {};  // {itemId: [{rating, date}, ...]}
-    const itemIdPattern = /\b([A-Z]{1,3}\d+\.\d+)\b/;
-    const accumulate = (rows, logDate) => {
-      (rows || []).forEach((r) => {
-        if (!r || !r.goal || !r.rating) return;
-        const match = r.goal.match(itemIdPattern);
-        if (!match) return;
-        const id = match[1];
-        if (!itemRatings[id]) itemRatings[id] = [];
-        itemRatings[id].push({ rating: r.rating, date: logDate || '' });
-      });
-    };
-    relevantLogs.forEach((log) => {
-      accumulate(log.goalsSocial, log.date);
-      accumulate(log.goalsEmo, log.date);
-    });
-
-    // 항목별 제안 점수 계산
     const result = {};
-    Object.entries(itemRatings).forEach(([id, ratings]) => {
-      // 최근 5회로 제한 (가장 최근 우선)
-      const recent = [...ratings].slice(-5);
-      if (recent.length < 3) return;  // 3회 미만이면 신뢰도 부족
-      const plus = recent.filter((r) => r.rating === '+').length;
-      const partial = recent.filter((r) => r.rating === '+/−' || r.rating === '+/-').length;
-      const minus = recent.filter((r) => r.rating === '−' || r.rating === '-').length;
-      const reachRate = (plus + partial * 0.5) / recent.length;
-
-      let suggested = null;
-      let reason = '';
-      if (plus >= 4 && minus === 0) {
-        suggested = 2;
-        reason = `최근 ${recent.length}회 중 ${plus}회 일관된 + → 2점 (안정적 사용)`;
-      } else if (reachRate >= 0.7 && plus >= 2) {
-        suggested = 2;
-        reason = `최근 ${recent.length}회 도달률 ${Math.round(reachRate*100)}% → 2점 (일관성 ↑)`;
-      } else if (reachRate >= 0.4) {
-        suggested = 1;
-        reason = `최근 ${recent.length}회 중 ${plus}회 + / ${partial}회 +/− → 1점 (촉구 시 가능)`;
-      } else if (plus + partial >= 2) {
-        suggested = 1;
-        reason = `최근 ${recent.length}회 중 일부 + 관찰 → 1점 검토`;
-      }
-
-      if (suggested !== null) {
-        result[id] = { suggested, reason, count: recent.length, reachRate };
-      }
+    weeklyGoalRows(ws).forEach((r) => {
+      if (!r.id || r.group !== 'child') return;
+      const hist = weeklyHistory(ws, r.key).filter((h) => !sessionDate || !h.date || h.date <= sessionDate);
+      if (hist.length < 2) return;
+      const recent = hist.slice(-3);
+      const suggested = recent[recent.length - 1].score;
+      result[r.id] = { suggested, reason: `주간 기록지 최근 ${recent.length}주: ${recent.map((h) => h.score).join('·')} → 최근 주 ${suggested}점`, count: hist.length };
     });
     return result;
-  }, [ws.activities, ws._sessionId, ws._allSessions]);
+  }, [ws.activities, ws.iep, ws._sessionId, ws._allSessions]);
 
   // 적용 가능한 (현재 점수와 다른) 제안만 카운트
   const applicableSuggestions = useMemo(() => {
@@ -7521,7 +7744,7 @@ function AssessScoreView({
 
   const applyAllSuggestions = async () => {
     if (applicableSuggestions.length === 0) return;
-    const msg = `회기 일지에서 ${applicableSuggestions.length}개 항목의 점수가 제안되었습니다.\n\n예시:\n` +
+    const msg = `주간 기록지에서 ${applicableSuggestions.length}개 항목의 점수가 제안되었습니다.\n\n예시:\n` +
       applicableSuggestions.slice(0, 3).map(([id, s]) => `- ${id}: ${s.suggested}점 (${s.reason})`).join('\n') +
       (applicableSuggestions.length > 3 ? `\n... 외 ${applicableSuggestions.length - 3}개` : '') +
       `\n\n현재 미채점 항목만 자동 적용합니다 (이미 채점된 항목은 보존).\n계속하시겠습니까?`;
@@ -7544,14 +7767,14 @@ function AssessScoreView({
 
   return (
     <>
-      {/* 회기 기반 제안 (있을 때만) */}
+      {/* 주간 기록지 기반 제안 (있을 때만) */}
       {applicableSuggestions.length > 0 && (
         <div className="session-suggestion-bar">
           <div className="ss-info">
             <span className="ss-icon">💡</span>
             <div>
               <strong>{applicableSuggestions.length}개 항목 점수 제안 가능</strong>
-              <div className="ss-hint">회기 일지의 도달 평가를 분석한 자동 제안입니다. 현재 점수와 다른 항목만 표시되며, 미채점 항목에만 자동 적용됩니다.</div>
+              <div className="ss-hint">주간 기록지의 최근 주 점수를 보여 주는 제안입니다. 현재 점수와 다른 항목만 표시되며, 미채점 항목에만 자동 적용됩니다.</div>
             </div>
           </div>
           <button className="btn-primary btn-small" onClick={applyAllSuggestions}>
@@ -7650,7 +7873,7 @@ function AssessScoreView({
                         onClick={() => updateScore(item.id, sug.suggested)}
                         title={sug.reason}
                       >
-                        💡 회기 기반 {sug.suggested}점 제안
+                        💡 주간 기록지 {sug.suggested}점 제안
                       </button>
                     )}
                   </span>
@@ -8111,53 +8334,10 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
   };
 
   // 점수가 0~1인 항목들 (우선순위 추천)
-  const recommendedGoals = useMemo(() => {
-    const list = [];
-    const stageKey = ws.meta.stage;
-    const weights = IEP_PRIORITY_WEIGHTS;
-    const foundations = FOUNDATION_ITEMS[stageKey] || new Set();
-    const tree = JA_DEVELOPMENT_TREE[stageKey] || {};
-    const familyFocus = new Set(ws.familyPriorities?.focusGoalIds || []);
-
-    Object.entries(stageData).forEach(([dkey, domain]) => {
-      domain.groups.forEach((g) =>
-        g.items.forEach((it) => {
-          const v = ws.assessment.scores[it.id];
-          if (v === 0 || v === 1) {
-            // 우선순위 점수 계산
-            let priority = weights.scoreBoost[v] || 0;
-            priority += weights.domainBoost[stageKey]?.[dkey] || 0;
-            if (foundations.has(it.id)) priority += weights.foundationBoost;
-            // 가족이 우선 선택한 항목은 SCERTS의 핵심 가치 - 가장 큰 가중치
-            const isFamilyChoice = familyFocus.has(it.id);
-            if (isFamilyChoice) priority += weights.familyChoiceBoost;
-            // 선행 항목이 모두 충족된 경우만 추천 가능
-            const prereqs = tree[it.id] || [];
-            const prereqsMet = prereqs.every(
-              (pid) => ws.assessment.scores[pid] === 1 || ws.assessment.scores[pid] === 2,
-            );
-            // 선행 미충족이면 우선순위 감소 (단, 가족 선택은 존중)
-            if (!prereqsMet && prereqs.length > 0 && !isFamilyChoice) priority -= 30;
-
-            list.push({
-              id: it.id,
-              label: it.label,
-              domain: domain.label,
-              domainKey: dkey,
-              score: v,
-              priority,
-              isFoundation: foundations.has(it.id),
-              isFamilyChoice,
-              prereqsMet,
-            });
-          }
-        }),
-      );
-    });
-
-    // 우선순위 내림차순 정렬
-    return list.sort((a, b) => b.priority - a.priority);
-  }, [ws.assessment.scores, stageData, ws.meta.stage, ws.familyPriorities]);
+  const recommendedGoals = useMemo(
+    () => computeRecommendedGoals(ws.meta.stage, ws.assessment.scores, ws.familyPriorities),
+    [ws.assessment.scores, ws.meta.stage, ws.familyPriorities],
+  );
 
   const toggleGoal = (item) => {
     // IS/LS(교류 지원)는 파트너 목표로 분기, 그 외는 아동 목표(selectedGoals)
@@ -8261,64 +8441,116 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
     // 보호자 보고 문장: 끝에 마침표 없으면 붙여서 다음 문장과 자연스럽게 분리
     // ★ 문장 끝에서 자른다. 문장 끝을 못 찾아 중간에서 잘린 경우 '…'를 남겨 잘린 것이 보이게 한다
     const q_sc1_cut = q_sc1 ? clipText(q_sc1, 100) : '';
-    const q_sc1_clean = !q_sc1_cut ? '' : (q_sc1_cut.endsWith('…') ? q_sc1_cut + ' ' : q_sc1_cut.replace(/[.。]?\s*$/, '') + '. ');
+    // ★ 보호자 말은 따옴표로 묶어 보고서 문체(~하였다)와 섞이지 않게 한다
+    const quoteRago = (t) => {   // "…"라고 / "…"이라고 (따옴표 안 끝 글자의 받침으로 고름)
+      const ch = t.slice(-1); const code = ch.charCodeAt(0) - 0xac00;
+      return (code >= 0 && code <= 11171 && code % 28 !== 0) ? '이라고' : '라고';
+    };
+    const q_sc1_clean = !q_sc1_cut ? '' : `"${q_sc1_cut.trim()}"${quoteRago(q_sc1_cut.trim())} 한다. `;
+    // ★ 목표 문장은 실제 진단 점수에서 고른 교수목표로 만든다 (단계·아이마다 달라짐)
+    const plan = buildGoalPlan(ws.meta.stage, ws.assessment.scores, ws.familyPriorities, ws.iep);
+    const nPartner = partnerCountWord(ws.meta.stage);
+    const stripPartner = (t) => t.replace(/^파트너는\s*/, '');
+    const titlesOf = (arr) => uniqTitles(arr).map((t) => `「${stripPartner(t)}」`).join('·');
+    const listOf = (arr) => arr.map((g, i) => `${'①②③④⑤⑥⑦⑧'[i]} ${goalRef(g)}`).join('\n');
     // 구성 요소 점수 문구: "11/20점(55%)"
     const compScore = (k) => {
       const d = domainTotals[k] || { score: 0, max: 0 };
       return `${d.score || 0}/${d.max || 0}점(${pct(d.score || 0, d.max || 0)}%)`;
     };
+    // ★ 책 1권 265쪽: 장기목표마다 칸(1점=1칸)의 절반 이상이면 상대적 강점, 절반 미만이면 상대적 요구
+    //   모든 교수목표를 채점한 장기목표만 판정한다(채점하지 않은 문항은 빈칸이 아니라 '아직 모름')
+    const sc0 = ws.assessment.scores || {};
+    const longGoalProfile = (k) => {
+      const d = stageData[k]; const strong = [], need = []; let unscored = 0;
+      (d?.groups || []).forEach((g) => {
+        const vals = g.items.map((it) => sc0[it.id]);
+        if (vals.some((v) => typeof v !== 'number')) { unscored += 1; return; }
+        const sum = vals.reduce((x, v) => x + v, 0);
+        const t = `「${stripPartner(g.title.replace(/^\d+\.\s*/, '')).replace(/[.。]\s*$/, '')}」`;
+        (sum >= g.items.length ? strong : need).push(t);
+      });
+      return { strong, need, unscored, label: (d?.label || '').replace(/\s*\(.*\)\s*$/, ''), score: domainTotals[k]?.score || 0 };
+    };
+    const profileSentence = (k) => {
+      const pr = longGoalProfile(k);
+      const parts = [];
+      if (pr.strong.length) parts.push(`상대적 강점은 ${pr.strong.join('·')}`);
+      if (pr.need.length) parts.push(`상대적 요구는 ${pr.need.join('·')}`);
+      if (!parts.length) return `${pr.label}(${pr.score}점)은 채점하지 않은 교수목표가 있어 장기목표별 강점과 요구를 판정하지 않았다.`;
+      const un = pr.unscored ? ` 채점하지 않은 교수목표가 있는 장기목표 ${pr.unscored}개는 판정하지 않았다.` : '';
+      return `${pr.label}(${pr.score}점)의 ${parts.join(', ')}이다.${un}`;
+    };
+    // ★ 사회-정서 성장 지표(1권 265쪽): 5개 교수목표가 모두 채점된 지표만 5칸 기준으로 판정
+    const sesNow = computeSes(ws.meta.stage, sc0);
+    const sesStrong = [], sesNeed = [];
+    if (sesNow) SES_INDICATORS.forEach((ind) => {
+      const d = sesNow.detail[ind.id];
+      if (!d || d.unscored) return;
+      (sesNow.values[ind.id] >= 5 ? sesStrong : sesNeed).push(ind.label);
+    });
+    const sesSentence = (sesStrong.length || sesNeed.length)
+      ? `사회-정서 성장 지표에서 ${[sesStrong.length ? `상대적 강점은 ${sesStrong.join('·')}` : '', sesNeed.length ? `상대적 요구는 ${sesNeed.join('·')}` : ''].filter(Boolean).join(', ')}이다. `
+      : '';
     const currentLevel = {
-      // ★ 영역 합계(총점)는 쓰지 않음 — 책은 구성 요소 점수만 따로 기록함(1권 254쪽)
-      sc: `${nmEunNeun(cName)} ${profile.headline} 수준에서 공동관심 ${compScore('joinAttention')}, ` +
-          `상징 사용 ${compScore('symbolUse')}으로 나타났다. ` +
+      // ★ 책은 백분율·패턴 이름을 쓰지 않고, 장기목표별 강점과 요구로 요약한다(1권 264~266쪽 진단 요약지)
+      sc: `${nmEunNeun(cName)} ${profile.headline}로 진단되었다. ` +
+          `${profileSentence('joinAttention')} ${profileSentence('symbolUse')} ` +
           (q_sc1_clean ? `보호자 보고에 따르면 ${q_sc1_clean}` : '') +
-          `점수가 낮은 항목을 IEP 목표로 선정하였다.`,
-      er: `${nmEunNeun(cName)} 정서 조절 영역에서 상호조절 ${compScore('mutualReg')}, ` +
-          `자기조절 ${compScore('selfReg')}으로, ` +
-          `${mrSrInfo ? `${mrSrInfo.title}에 해당한다. ` : '조절 패턴은 판정하지 않았다. '}` +
-          (mrSrInfo ? localizeText(mrSrInfo.interpretation, cName) + ' ' : '') +
+          `주간 교수목표는 기능성, 가족의 우선순위, 발달적 적합성을 기준으로 선정하였다.`,
+      er: `${profileSentence('mutualReg')} ${profileSentence('selfReg')} ` +
+          sesSentence +
           (q_er_strength ? `흥미를 보이는 활동은 ${clipText(q_er_strength, 80).replace(/[.。]?\s*$/, '')}이며, ` : '') +
           (q_er_challenge ? `어려움을 보이는 상황은 ${clipText(q_er_challenge, 80).replace(/[.。]?\s*$/, '')}이다.` : ''),
       // ★ 교류 지원은 파트너(어른·환경)에 대한 평가라 아이를 주어로 쓰지 않음(1권 250~251쪽)
-      ts: `파트너의 교류 지원은 대인관계 지원 ${compScore('interpersonalSupport')}, ` +
-          `학습 지원 ${compScore('learningSupport')} 수준이다. ` +
-          `파트너의 반응성, 시작행동 촉진, 언어 조절, 시각 지원 사용에서 교실과 가정 간 일관성 확보가 우선 과제이다.`,
+      ts: `${profileSentence('interpersonalSupport')} ${profileSentence('learningSupport')}`,
     };
+    Object.keys(currentLevel).forEach((k) => { currentLevel[k] = currentLevel[k].trim(); });
 
     // 가족 우선순위가 있으면 단기 목표에 반영
-    const familyEcho = familyHopeText ? ` (가족 희망: ${familyHopeText.slice(0, 50).replace(/[.。]?\s*$/, '')})` : '';
-
-    // priorities 텍스트 끝의 '안정화/확장' 등과 뒤 동사 중복 방지
-    const scPriority = profile.priorities[0].split('—')[0].trim();
-    const scGoalVerb = /안정화$/.test(scPriority) ? '를 목표로 한다' :
-                       /확장$/.test(scPriority) ? '을 목표로 한다' : '을 안정화한다';
 
     const filled = {
       currentLevel,
+      // ★ 장기목표 = 고른 교수목표가 속한 장기목표(JA1, SU5 …), 단기목표 = 교수목표 + 책의 2점 기준(1권 253·274쪽)
       annualGoals: {
-        sc: `${nmEunNeun(cName)} 일상적인 놀이 및 과제 상황에서 기능적인 의사소통 수단을 사용하여 ` +
-            `${scPriority}${scGoalVerb}.${familyEcho}`,
-        er: `${nmEunNeun(cName)} 감정 변화 상황에서 ${mrSrInfo && mrSrPattern === 'lowMR_lowSR' ? '파트너의 도움을 받아' : '점진적으로 스스로'} ` +
-            `조절 전략을 사용하여 활동에 재참여한다.`,
-        ts: `파트너는 ${nmUi(cName)} 의사소통 및 정서 신호를 일관성 있게 인식하고 반응하며, ` +
-            `예측 가능한 환경과 시각 지원을 제공한다.`,
+        sc: plan.sc.length
+          // ★ 가족 우선순위는 목표를 고를 때 반영하고 문장에는 적지 않는다(책 2권 33~35쪽: 선정 기준)
+          ? `${nmEunNeun(cName)} 일상 활동에서 장기목표 ${titlesOf(plan.sc)}에 해당하는 교수목표에 도달한다.`
+          : '',
+        er: plan.er.length
+          ? `${nmEunNeun(cName)} 일상 활동에서 장기목표 ${titlesOf(plan.er)}에 해당하는 교수목표에 도달한다.`
+          : '',
+        ts: plan.ts.length
+          ? (titlesOf(plan.ts)
+            ? `파트너는 교류 지원 장기목표 ${titlesOf(plan.ts)}에 해당하는 지원을 일관성 있게 제공한다.`
+            : `파트너는 다음 단기목표의 교류 지원을 일관성 있게 제공한다.`)
+          : '',
       },
       shortGoals: {
-        sc: '원하는 활동 또는 물건을 요청 시 자발적으로 단어 이상 수준의 의사소통을 1일 2회 이상 사용한다.',
-        er: mrSrInfo && mrSrInfo.strategies && mrSrInfo.strategies[0]
-            ? localizeText(mrSrInfo.strategies[0], cName)
-            : '활동 전 전이 상황에서 시각일과표·타이머 사용을 통해 전이에 긍정적으로 반응한다.',
-        ts: '시각일과표를 보며 다음 활동을 예측하고, 준비 행동을 3회 중 2회 이상 수행한다.',
+        sc: plan.sc.length
+          ? `${nmEunNeun(cName)} 두 가지 이상의 상황에서 ${nPartner} 명 이상의 파트너와 함께 다음 교수목표에 일관성 있게 도달한다.\n${listOf(plan.sc)}`
+          : '',
+        er: plan.er.length
+          ? `${nmEunNeun(cName)} 두 가지 이상의 상황에서 ${nPartner} 명 이상의 파트너와 함께 다음 교수목표에 일관성 있게 도달한다.\n${listOf(plan.er)}`
+          : '',
+        ts: plan.ts.length
+          ? `파트너는 두 가지 이상의 활동에서 다음 교류 지원을 일관성 있게 제공한다.\n${listOf(plan.ts)}`
+          : '',
       },
+      // ★ 전략 = 점수가 낮은 교류 지원 문항(대인관계 지원·학습 지원) 중 그 영역을 돕는 것
       strategies: {
-        sc: 'NET + FCT, 촉구 계층, 자연스러운 의사소통 기회 조성',
-        er: '시각 단서 사용, 전이 예고 루틴, 감정 온도계',
-        ts: '시각일과표, 강화계획, 일관된 파트너 반응',
+        sc: plan.scSupports.length ? listOf(plan.scSupports) : '',
+        er: plan.erSupports.length ? listOf(plan.erSupports) : '',
+        // ★ 교류 지원은 아동 목표를 다루는 활동 안에서 함께 제공한다 (2권 4장: 아동 목표와 파트너 목표의 연계)
+        ts: plan.ts.length
+          ? `위 교류 지원(${plan.ts.map((g) => g.id || g.label).join('·')})은 ${(plan.sc.length + plan.er.length) ? `아동 목표(${[...plan.sc, ...plan.er].map((g) => g.id).join('·')})를` : '아동 목표를'} 다루는 활동마다 활동 계획서에 함께 표시하여 가정과 기관의 파트너가 같은 방식으로 제공한다.`
+          : '',
       },
+      // ★ 평가 = 활동 일지 → 주간 기록지(목표별 0·1·2점) → 분기별 재진단 (2권 350쪽, 1권 7장)
       measures: {
-        sc: '일일 기록지, 빈도 측정',
-        er: '반응 체크리스트, 회복 시간 측정',
-        ts: '활동 전 관찰 기록, 파트너 자기점검',
+        sc: '활동 일지를 바탕으로 주간 기록지에 교수목표별 0·1·2점을 기록하고, 분기마다 SCERTS 진단-관찰로 다시 평가한다.',
+        er: '활동 일지를 바탕으로 주간 기록지에 교수목표별 0·1·2점을 기록하고, 분기마다 SCERTS 진단-관찰로 다시 평가한다.',
+        ts: '주간 기록지에 파트너의 교류 지원 실행을 0·1·2점으로 기록하고, 분기마다 다시 평가한다.',
       },
     };
     // 기존 사용자 입력은 보존, 빈 값만 자동 채움
@@ -8329,7 +8561,7 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
       Object.keys(generated).forEach((k) => {
         if (!existing[k] || (typeof existing[k] === 'string' && existing[k].trim() === '')) {
           out[k] = generated[k];
-          filledCount++;
+          if (generated[k]) filledCount++;   // 비워 둔 칸은 채운 개수에 넣지 않음
         } else {
           preservedCount++;
         }
@@ -8352,6 +8584,12 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
         ? `${filledCount}개 필드 자동 채움 · ${preservedCount}개 기존 입력 보존`
         : `${filledCount}개 필드를 자동으로 채웠습니다`;
       showToast(msg);
+    }
+    // ★ 0~1점 문항이 없어 목표를 만들 수 없던 영역은 비워 두고 이유를 알려 준다 (인쇄물에 안내 문구가 섞이지 않게)
+    const AREA = { sc: '사회 의사소통', er: '정서 조절', ts: '교류 지원' };
+    const blankAreas = Object.keys(AREA).filter((k) => !filled.shortGoals[k] && !(ws.iep.shortGoals?.[k] || '').trim());
+    if (blankAreas.length > 0) {
+      await appAlert(`${blankAreas.map((k) => AREA[k]).join('·')} 연간/단기목표는 0~1점으로 채점된 문항이 없어 비워 두었습니다.\n채점을 더 하거나 우선순위 목표를 고른 뒤 다시 눌러 주세요.`);
     }
   };
 
@@ -8450,14 +8688,12 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
           <section className="report-section page-break-before">
             <h3 className="report-h3">3. SCERTS 주간 교수목표의 우선순위</h3>
             <p className="hint no-print">
-              SCERTS 매뉴얼은 우선순위 결정 시 <strong>① 진단 점수 ② 사회-정서 지표 ③ 가족의 견해</strong>
-              세 요소를 통합하도록 안내합니다. 아래 추천은 이 원칙을 자동 반영한 정렬입니다.
+              추천 순서는 책의 교수목표 선정 기준(기능성·가족의 우선순위·발달적 적합성, 2권 32~35쪽)에 따라
+              <strong>가족 우선 항목 → 1점(연습 중) → 0점(배우는 중)</strong>, 같은 점수는 앞 장기목표·앞 교수목표 순입니다.
+              기능성(아이 생활에 바로 쓰이는지)은 선생님이 판단해 고릅니다.
               <span className="legend-tag family">❤️ 가족 우선</span>은 가족 우선순위에서 선택한 항목,
-              <span className="legend-tag found">🏛 토대</span>는 영역의 첫 항목,
-              <span className="legend-tag prereq">⚠ 선행</span>은 선행 항목이 아직 미도달인 항목입니다.
+              <span className="legend-tag found">🏛 토대</span>는 장기목표의 첫 교수목표입니다.
               <span className="legend-tag partner-legend">👥 파트너</span>는 교류 지원 영역으로, 클릭 시 우측 "파트너 교류 지원" 칸에 추가됩니다.
-              <br />
-              <em>※ 토대성·선행 의존성은 임상 판단의 보조 가이드이며 절대적 규칙이 아닙니다.</em>
             </p>
             <div className="goal-recommend no-print">
               {recommendedGoals.length === 0 && (
@@ -8476,7 +8712,7 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
                     key={g.id}
                     className={`goal-chip ${selected ? 'selected' : ''} ${g.isFoundation ? 'foundation' : ''} ${g.isFamilyChoice ? 'family-choice' : ''} ${!g.prereqsMet ? 'prereq-unmet' : ''} ${isPartnerDomain ? 'partner-domain' : ''}`}
                     onClick={() => toggleGoal(g)}
-                    title={`우선순위 점수: ${g.priority}${isPartnerDomain ? ' (파트너 교류 지원 목표)' : ''}`}
+                    title={`${g.score}점(${g.score === 1 ? '연습 중' : '배우는 중'})${g.isFamilyChoice ? ' · 가족 우선' : ''}${isPartnerDomain ? ' · 파트너 교류 지원 목표' : ''}`}
                   >
                     {rank < 5 && <span className="goal-rank">#{rank + 1}</span>}
                     <span className="goal-chip-id">{g.id}</span>
@@ -8485,6 +8721,7 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
                     {g.isFoundation && <span className="goal-tag found-tag">🏛</span>}
                     {!g.prereqsMet && <span className="goal-tag prereq-tag">⚠</span>}
                     <span>{g.label}</span>
+                    {g.sameAs && <span className="goal-tag" title="책에서 같은 문항으로 표시된 짝">= {g.sameAs.join(', ')}</span>}
                     <span className={`goal-chip-score score-${g.score}`}>{g.score}점</span>
                   </button>
                 );
@@ -8639,6 +8876,14 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     return result;
   }, [ws.pre, ws.post, stageData]);
 
+  // ★ 장기목표 강점/요구(1권 265쪽: 칸 절반 이상 = 상대적 강점) — 모든 교수목표를 채점한 장기목표만
+  const groupStrength = (scores, g) => {
+    const vals = g.items.map((it) => scores?.[it.id]);
+    if (vals.some((v) => typeof v !== 'number')) return null;
+    return vals.reduce((a, v) => a + v, 0) >= g.items.length ? 'strong' : 'need';
+  };
+  const gTitle = (g) => `「${g.title.replace(/^\d+\.\s*/, '').replace(/^파트너는\s*/, '').replace(/[.。]\s*$/, '')}」`;
+
   // 진단·활동기록·MR-SR 분석을 통합한 자동 채움
   const autoFillInterim = () => {
     const profile = STAGE_PROFILE[ws.meta.stage];
@@ -8653,7 +8898,7 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
       const TS_KEYS = ['interpersonalSupport', 'learningSupport'];
       const childDomains = compareData.filter((d) => !TS_KEYS.includes(d.domain));
       const partnerDomains = compareData.filter((d) => TS_KEYS.includes(d.domain));
-      const fmt = (d) => `${d.label} ${d.pre}→${d.post}/${d.max}점`;
+      const fmt = (d) => `${d.label} ${d.pre}점→${d.post}점`;
       if (childDomains.length > 0) {
         summary += `구성 요소별 진단 점수는 사전에서 사후로 ${childDomains.map(fmt).join(', ')}으로 변화하였다. `;
       }
@@ -8665,16 +8910,25 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
       if (partnerDomains.length > 0) {
         summary += `파트너의 교류 지원은 ${partnerDomains.map(fmt).join(', ')}으로 변화하였다. `;
       }
+      // ★ 분기 재진단(1권 269쪽): 사전에 상대적 요구였다가 사후에 상대적 강점이 된 장기목표
+      const turned = [];
+      Object.entries(stageData).forEach(([k, d]) => {
+        if (TS_KEYS.includes(k)) return;
+        d.groups.forEach((g) => { if (groupStrength(ws.pre?.scores, g) === 'need' && groupStrength(ws.post?.scores, g) === 'strong') turned.push(gTitle(g)); });
+      });
+      if (turned.length) summary += `사전 진단에서 상대적 요구였던 장기목표 중 ${turned.join('·')}${hasJongseong(turned[turned.length - 1].slice(0, -1)) ? '은' : '는'} 사후 진단에서 상대적 강점(칸의 절반 이상)이 되었다. `;
     }
-    summary += `이 단계의 핵심 발달 과제는 ${profile.features.slice(0, 2).join(', ')}이며, 해당 과제를 중심으로 지원하였다.`;
+    // (단계 특징 문장은 쓰지 않는다 — 실제로 무엇을 지원했는지는 주간 목표·기록으로 적는다)
     // 가족 우선순위 인용
     const familyFocus = (ws.familyPriorities?.focusOne || '').trim();
     const familyHope = (ws.familyPriorities?.threeMonthHope || '').trim();
     if (familyFocus || familyHope) {
-      summary += `\n\n가족 우선순위로는 `;
-      if (familyFocus) summary += `"${familyFocus}"`;
+      // ★ 안에 따옴표가 이미 있으면 「」로 묶어 따옴표가 겹치지 않게 한다
+      const qt = (t) => (/["“”]/.test(t) ? `「${t}」` : `"${t}"`);
+      summary = summary.trim() + `\n\n가족 우선순위로는 `;
+      if (familyFocus) summary += qt(familyFocus);
       // ★ 조사 을/를을 앞말 받침에 맞춤
-      if (familyHope) summary += `${familyFocus ? eulReul(familyFocus) + ' 중점 영역으로 두고, ' : ''}3개월 내 "${familyHope}"${eulReul(familyHope)} 단기 희망으로 공유하였다.`;
+      if (familyHope) summary += `${familyFocus ? eulReul(familyFocus) + ' 중점 영역으로 두고, ' : ''}3개월 내 ${qt(familyHope)}${eulReul(familyHope)} 단기 희망으로 공유하였다.`;
       else summary += `${eulReul(familyFocus)} 중심으로 지원하였다.`;
     }
 
@@ -8697,10 +8951,18 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
             }),
           );
         }
-        let progress = `사전 ${d.pre}점에서 사후 ${d.post}점으로 ${d.delta > 0 ? `${d.delta}점 상승` : d.delta < 0 ? `${Math.abs(d.delta)}점 하락` : '변화 없음'}(만점 ${d.max}점). ` +
-                       `${d.delta > 0 ? '향상이 확인되었다.' : d.delta < 0 ? '재평가가 필요하다.' : '수준이 유지되었다.'}`;
+        // ★ 책은 백분율·만점 대비를 쓰지 않는다. 점수 변화 + 장기목표 강점/요구 변화 + 점수가 오른 교수목표
+        let progress = `사전 ${d.pre}점에서 사후 ${d.post}점으로 ${d.delta > 0 ? `${d.delta}점 높아졌다` : d.delta < 0 ? `${Math.abs(d.delta)}점 낮아졌다` : '변화가 없었다'}.`;
+        const toStrong = [], toNeed = [];
+        (stageData[d.domain]?.groups || []).forEach((g) => {
+          const a = groupStrength(preScores, g), b = groupStrength(postScores2, g);
+          if (a === 'need' && b === 'strong') toStrong.push(gTitle(g));
+          if (a === 'strong' && b === 'need') toNeed.push(gTitle(g));
+        });
+        if (toStrong.length) progress += ` 상대적 요구에서 상대적 강점이 된 장기목표: ${toStrong.join('·')}.`;
+        if (toNeed.length) progress += ` 상대적 강점에서 상대적 요구가 된 장기목표: ${toNeed.join('·')}.`;
         if (improvedItems.length > 0) {
-          progress += ` 향상이 관찰된 항목: ${improvedItems.slice(0, 3).join(', ')}${improvedItems.length > 3 ? ` 외 ${improvedItems.length - 3}개` : ''}.`;
+          progress += ` 점수가 오른 교수목표: ${improvedItems.slice(0, 3).join(', ')}${improvedItems.length > 3 ? ` 외 ${improvedItems.length - 3}개` : ''}.`;
         }
         domainSummary[d.domain] = { behavior: '', progress };
       });
@@ -8709,8 +8971,21 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     // 3) 관찰 예시 - 활동 일지 I의 최근 회기에서 추출
     const logs = ws.activities?.logI || [];
     let observations = '';
+    // ★ 주간 기록지(1권 268쪽): 목표별 주간 0·1·2점 흐름 — 책의 진도 점검 도구
+    const wRows = weeklyGoalRows(ws).map((r) => ({ ...r, hist: weeklyHistory(ws, r.key) })).filter((r) => r.hist.length);
+    if (wRows.length) {
+      const nW = Math.max(...wRows.map((r) => r.hist.length));
+      const line = (r) => `  · ${r.id ? `${r.id} ` : ''}「${r.label}」: ${r.hist.map((h) => h.score).join(' → ')}`;
+      const ch = wRows.filter((r) => r.group === 'child'), pt = wRows.filter((r) => r.group === 'partner');
+      observations += `주간 기록지(최대 ${nW}주 기록)의 목표별 점수 흐름은 다음과 같다.\n`;
+      if (ch.length) observations += `▸ 아동 목표\n${ch.map(line).join('\n')}\n`;
+      if (pt.length) observations += `▸ 파트너 교류 지원 목표\n${pt.map(line).join('\n')}\n`;
+      const stuck = wRows.filter((r) => zeroRun(r.hist).now >= 3);
+      if (stuck.length) observations += `3주 연속 0점인 목표: ${stuck.map((r) => r.id || r.label).join(', ')}\n`;
+      observations += '\n';
+    }
     if (logs.length > 0) {
-      observations = `회기별 활동 일지 ${logs.length}건 중 최근 회기의 주요 관찰 사례는 다음과 같다.\n\n`;
+      observations += `활동 일지 ${logs.length}건 중 최근 기록의 유의점은 다음과 같다.\n\n`;
       const recentLogs = logs.slice(-3); // 최근 3회기
       recentLogs.forEach((log, i) => {
         observations += `▸ ${log.date || `회기 ${i + 1}`} - ${log.fields?.activity || '활동'}\n`;
@@ -8719,69 +8994,44 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
           ...(log.goalsEmo || []).filter((g) => g?.observed),
         ];
         if (allObs.length > 0) {
-          observations += allObs.slice(0, 2).map((g) => `  · ${g.observed} (${g.rating || '기록 중'})`).join('\n') + '\n';
+          observations += allObs.slice(0, 2).map((g) => `  · ${g.observed}${(g.rating || '').trim() ? ` (${g.rating.trim()})` : ''}`).join('\n') + '\n';
         }
         if (log.notes) observations += `  메모: ${log.notes.slice(0, 100)}\n`;
         observations += '\n';
       });
-    } else {
-      observations = '활동 일지에 회기 기록을 추가하면 관찰 사례가 자동으로 인용됩니다.';
+    } else if (!observations) {
+      observations = '활동 일지와 주간 기록지를 쓰면 진도와 관찰 사례가 자동으로 인용됩니다.';
     }
 
-    // 4) 향후 중재 방향 - MR/SR 패턴 분석에서 전략 가져오기
+    // 4) 향후 중재 방향 — 책의 분기 점검(1권 269쪽, 2권 350쪽):
+    //   2점에 도달한 목표는 새 목표로, 0·1점 목표는 계속하거나 수정, 3주 연속 0점이면 더 낮은 수준의 목표나 지원 수정,
+    //   다음 목표는 사후 프로파일에서 기능성·가족의 우선순위·발달적 적합성으로 고른다
     const postScores = ws.post?.scores || ws.assessment.scores;
-    let mrSum = 0, mrMax = 0, srSum = 0, srMax = 0;
-    if (stageData.mutualReg) {
-      stageData.mutualReg.groups.forEach((g) =>
-        g.items.forEach((it) => {
-          mrMax += 2;
-          if (typeof postScores[it.id] === 'number') mrSum += postScores[it.id];
-        }),
-      );
-    }
-    if (stageData.selfReg) {
-      stageData.selfReg.groups.forEach((g) =>
-        g.items.forEach((it) => {
-          srMax += 2;
-          if (typeof postScores[it.id] === 'number') srSum += postScores[it.id];
-        }),
-      );
-    }
-    const mrP = mrMax ? mrSum / mrMax : 0;
-    const srP = srMax ? srSum / srMax : 0;
-    const pattern = classifyMrSr(mrP, srP);  // ★ 진단 분석·IEP와 같은 기준 (50% 하나로 강점/요구)
-    const mrSrInfo = pattern ? MR_SR_BRIDGE[pattern] : null;
-
-    let direction = mrSrInfo
-      ? `정서 조절 영역의 현재 프로파일은 상호조절 ${Math.round(mrP * 100)}%, 자기조절 ${Math.round(srP * 100)}%로 ` +
-        `${mrSrInfo.title}에 해당한다.\n\n` +
-        `${localizeText(mrSrInfo.interpretation, cName)}\n\n` +
-        `다음 기간에는 다음 전략을 중점적으로 적용한다.\n` +
-        mrSrInfo.strategies.map((s, i) => `${i + 1}. ${localizeText(s, cName)}`).join('\n')
-      : `정서 조절 영역의 현재 프로파일은 상호조절 ${Math.round(mrP * 100)}%, 자기조절 ${Math.round(srP * 100)}%로, ` +
-        `조절 패턴은 판정하지 않았다.`;
-    // IEP 주간 우선순위 목표 연결
-    const selectedGoals = ws.iep?.selectedGoals || [];
-    if (selectedGoals.length > 0) {
-      direction += `\n\n또한 IEP에서 선정된 주간 우선순위 목표를 다음 기간에도 지속 적용한다:\n` +
-                   selectedGoals.slice(0, 5).map((g, i) =>
-                     `${i + 1}. [${g.id}] ${g.customGoal || g.label || g.goal || ''}`
-                   ).join('\n');
-    }
-    // 파트너 교류 지원 목표 연결
-    const partnerGoals = (ws.iep?.partnerGoals || []).filter((p) => {
-      if (typeof p === 'object' && p?.id) return (p.customGoal || p.label || '').trim();
-      return typeof p === 'string' && p.trim();
+    const plan = buildGoalPlan(ws.meta.stage, postScores, ws.familyPriorities, null);
+    const nextWord = isClosing ? '이후 환경에서는' : '다음 기간에는';
+    const lk = itemLookup(ws.meta.stage);
+    const iepRows = weeklyGoalRows(ws).map((r) => ({ ...r, score: r.id ? postScores[r.id] : undefined, hist: weeklyHistory(ws, r.key) }));
+    const ref = (g) => `${g.id ? `${g.id} ` : ''}「${g.label}」`;
+    const numbered = (arr, f) => arr.map((g, i) => `${i + 1}. ${f ? f(g) : ref(g)}`).join('\n');
+    const parts = [];
+    ['child', 'partner'].forEach((grp) => {
+      const rowsG = iepRows.filter((r) => r.group === grp);
+      if (!rowsG.length) return;
+      const nm = grp === 'child' ? 'IEP 주간 목표' : '파트너 교류 지원 목표';
+      const reached = rowsG.filter((g) => g.score === 2);
+      const ongoing = rowsG.filter((g) => g.score !== 2);
+      if (reached.length) parts.push(`${nm} 중 사후 진단에서 일관성 있게 도달(2점)한 목표이다. ${isClosing ? '이후 환경에서 유지되는지 확인한다.' : '새로운 목표로 바꾼다.'}\n${numbered(reached)}`);
+      if (ongoing.length) parts.push(`${nm} 중 ${isClosing ? '이후 환경에서도 계속 지원이 필요한' : '다음 기간에도 계속 다루는'} 목표이다.\n${numbered(ongoing, (g) => `${ref(g)}${typeof g.score === 'number' ? ` (사후 ${g.score}점)` : ' (사후 미채점)'}`)}`);
     });
-    if (partnerGoals.length > 0) {
-      direction += `\n\n파트너(치료사·부모) 교류 지원 측면에서는:\n` +
-                   partnerGoals.slice(0, 3).map((p, i) => {
-                     const txt = typeof p === 'object'
-                       ? `[${p.id}] ${p.customGoal || p.label || ''}`
-                       : p;
-                     return `${i + 1}. ${txt}`;
-                   }).join('\n');
-    }
+    const stuckRows = iepRows.filter((r) => zeroRun(r.hist).now >= 3);
+    if (stuckRows.length) parts.push(`주간 기록지에서 3주 연속 0점인 목표는 더 낮은 수준의 목표로 바꾸거나 활동·교류 지원을 수정한다.\n${numbered(stuckRows)}`);
+    const nextChild = [...plan.sc, ...plan.er].filter((g) => !iepRows.some((r) => r.id === g.id));
+    if (nextChild.length) parts.push(`${nextWord} 사후 진단에서 아직 일관되지 않은 다음 교수목표를 후보로 검토한다(사회 의사소통·정서 조절).\n${numbered(nextChild, (g) => `${goalRef(g)} (사후 ${g.score}점)`)}`);
+    const nextTs = plan.ts.filter((g) => !iepRows.some((r) => r.id === g.id));
+    if (nextTs.length) parts.push(`이 목표를 돕기 위해 파트너가 보완할 교류 지원 후보이다.\n${numbered(nextTs, goalRef)}`);
+    const hope3 = (ws.familyPriorities?.threeMonthHope || '').trim();
+    if (!isClosing && hope3) parts.push(`다음 3개월의 주간 목표는 ${(nextChild.length || nextTs.length) ? '위 후보 가운데 ' : ''}기능성, 가족의 우선순위(${hope3.replace(/[.。]\s*$/, '')}), 발달적 적합성을 기준으로 정한다.`);
+    let direction = parts.join('\n\n');
 
     // 빈 필드만 자동 채움 (사용자 입력 보존)
     const isEmpty = (v) => !v || (typeof v === 'string' && v.trim() === '');
@@ -8789,25 +9039,43 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     let preservedCount = 0;
     if (isEmpty(ws.interim.summary)) { updateInterim('summary', summary); filledCount++; } else preservedCount++;
     if (Object.keys(ws.interim.domainSummary || {}).length === 0) { updateInterim('domainSummary', domainSummary); filledCount++; } else preservedCount++;
+    observations = observations.trim();
     if (isEmpty(ws.interim.observations)) { updateInterim('observations', observations); filledCount++; } else preservedCount++;
     if (isEmpty(ws.interim.direction)) { updateInterim('direction', direction); filledCount++; } else preservedCount++;
 
     // [종결 모드] 목표 달성도(IEP 끌어오기) + 향후 권고 자동 채움
     if (isClosing) {
       if ((ws.interim.goalAchievement || []).length === 0) {
-        const goals = [];
-        ['sc', 'er', 'ts'].forEach((k) => {
-          const g = (ws.iep?.annualGoals?.[k] || '').trim();
-          if (g) goals.push({ goal: g, status: '', note: '' });
-        });
-        (ws.iep?.selectedGoals || []).forEach((sg) => {
-          const g = (sg.customGoal || sg.label || sg.goal || '').trim();
-          if (g) goals.push({ goal: g, status: '', note: '' });
+        // ★ 목표 달성도 = IEP 주간 목표(아동)·파트너 목표마다 사후 진단 점수(책 0·1·2점 기준)와 주간 기록지 흐름
+        const stLabel = ACHIEVE_LABEL;
+        const scoreWord = { 2: '일관성 있게 도달', 1: '일관성 없이 또는 보조를 받아 도달', 0: '도달하지 못함' };
+        const goals = iepRows.map((g) => {
+          const sc = typeof g.score === 'number' ? g.score : null;
+          const notes = [];
+          if (sc !== null) notes.push(`사후 ${sc}점(${scoreWord[sc]})`);
+          if (g.hist.length) notes.push(`주간 기록지: ${g.hist.map((h) => h.score).join(' → ')}`);
+          return { goal: `${g.group === 'partner' ? '[파트너] ' : ''}${ref(g)}`, status: sc !== null ? stLabel[sc] : '', note: notes.join(' / ') };
         });
         if (goals.length > 0) { updateInterim('goalAchievement', goals); filledCount++; }
       } else preservedCount++;
       if (isEmpty(ws.interim.recommendation)) {
-        updateInterim('recommendation', '가정 및 다음 환경(학교/기관)에서의 일관된 지원을 위해 다음을 권고한다: ① 자발적 의사소통 기회 확대, ② 시각적 지원과 정서 조절 전략의 지속, ③ 새로운 환경 전이 시 점진적 적응 지원.');
+        // ★ IEP 목표의 사후 결과로 권고: 계속 지원할 아동 목표 / 다음 파트너에게 전할 교류 지원(2점) / 보완할 교류 지원(0·1점) / 가족 희망
+        const parts = [];
+        const contChild = iepRows.filter((g) => g.group === 'child' && (g.score === 0 || g.score === 1));   // 사후 미채점 목표는 판단하지 않음
+        const tsDone = iepRows.filter((g) => g.group === 'partner' && g.score === 2);
+        const tsWeak = iepRows.filter((g) => g.group === 'partner' && (g.score === 0 || g.score === 1));
+        const list = (arr) => arr.map(ref).join(', ');
+        if (contChild.length) parts.push(`아직 일관되게 도달하지 않은 교수목표(${list(contChild)})를 다음 환경에서 계속 지원한다`);
+        else if (iepRows.length === 0 && (plan.sc.length || plan.er.length)) parts.push(`아직 일관되게 도달하지 않은 교수목표(${[...plan.sc, ...plan.er].map(goalRef).join(', ')})를 다음 환경에서 계속 지원한다`);
+        if (tsDone.length) parts.push(`일관되게 제공된 교류 지원(${list(tsDone)})을 다음 환경의 파트너에게 전달한다`);
+        else if (iepRows.length === 0 && plan.tsStrong.length) parts.push(`일관되게 제공되고 있는 교류 지원(${plan.tsStrong.map(goalRef).join(', ')})을 다음 환경의 파트너에게 전달한다`);
+        if (tsWeak.length) parts.push(`아직 일관되지 않은 교류 지원(${list(tsWeak)})을 가정과 다음 환경에서 함께 보완한다`);
+        else if (iepRows.length === 0 && plan.ts.length) parts.push(`아직 일관되지 않은 교류 지원(${plan.ts.map(goalRef).join(', ')})을 가정과 다음 환경에서 함께 보완한다`);
+        const hope = (ws.familyPriorities?.threeMonthHope || '').trim();
+        if (hope) parts.push(`다음 환경의 목표는 기능성, 가족의 우선순위(${hope.replace(/[.。]\s*$/, '')}), 발달적 적합성을 기준으로 정한다`);
+        updateInterim('recommendation', parts.length
+          ? '가정 및 다음 환경(학교/기관)에서의 일관된 지원을 위해 다음을 권고한다. ' + parts.map((t, i) => `${'①②③④'[i]} ${t}.`).join(' ')
+          : '');
         filledCount++;
       } else preservedCount++;
     }
@@ -9047,9 +9315,9 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
                     <td>
                       <select className="closing-status-sel" value={g.status} onChange={(e) => { const arr=[...ws.interim.goalAchievement]; arr[i]={...arr[i],status:e.target.value}; updateInterim('goalAchievement',arr); }}>
                         <option value="">선택</option>
-                        <option value="달성">달성</option>
-                        <option value="부분 달성">부분 달성</option>
-                        <option value="미달성">미달성</option>
+                        {[2, 1, 0].map((n) => <option key={n} value={ACHIEVE_LABEL[n]}>{ACHIEVE_LABEL[n]}</option>)}
+                        {/* ★ 예전에 고른 값(달성/부분 달성/미달성 등)도 지우지 않고 그대로 보이게 */}
+                        {g.status && !Object.values(ACHIEVE_LABEL).includes(g.status) && <option value={g.status}>{g.status} (예전 선택)</option>}
                       </select>
                       <span className="closing-status-print print-only">{g.status || '—'}</span>
                     </td>
@@ -10543,14 +10811,15 @@ function ActivityTab({ ws, setWs, showToast }) {
       />
       <div className="card">
         <h2 className="section-title">활동 기록</h2>
-        <p className="hint">개별 회기, 주간 종합, 활동 계획서를 작성할 수 있습니다.</p>
+        <p className="hint">책의 순서대로 활동 일지에 매일 기록하고, 그 기록으로 주간 기록지에 목표별 0·1·2점을 매깁니다(1권 268쪽). 활동 계획서에는 하루 활동마다 다룰 목표를 표시합니다.</p>
 
         <div className="activity-nav no-print">
           {[
             { id: 'logI', label: '회기별 활동 일지' },
-            { id: 'logII', label: '주간 종합 기록' },
+            { id: 'weeklyScores', label: '주간 기록지' },
             { id: 'plan', label: '활동 계획서' },
-            { id: 'stats', label: '📊 회기 통계' },
+            { id: 'logII', label: '주간 메모 (센터 양식)' },
+            { id: 'stats', label: '📊 진도 보기' },
           ].map((v) => (
             <button
               key={v.id}
@@ -10564,6 +10833,7 @@ function ActivityTab({ ws, setWs, showToast }) {
 
         {view === 'logI' && <ActivityLogI ws={ws} setWs={setWs} showToast={showToast} />}
         {view === 'logII' && <ActivityLogII ws={ws} setWs={setWs} />}
+        {view === 'weeklyScores' && <WeeklyScoreSheet ws={ws} setWs={setWs} />}
         {view === 'plan' && <ActivityPlan ws={ws} setWs={setWs} />}
         {view === 'stats' && <ActivityStats ws={ws} />}
       </div>
@@ -10909,9 +11179,10 @@ function ActivityLogI({ ws, setWs, showToast }) {
           </section>
 
           {[
-            { title: '아동의 사회 의사소통 목표', key: 'goalsSocial', cols: ['목표', '관찰된 행동/예', '도달 여부'], rows: 6 },
-            { title: '아동의 정서 조절 목표', key: 'goalsEmo', cols: ['목표', '관찰된 행동/예', '도달 여부'], rows: 4 },
-            { title: '파트너의 교류 지원 목표', key: 'partnerGoals', cols: ['목표', '사용한 전략/예', '효과'], rows: 6 },
+            // ★ 책 활동 일지(1권 268쪽·부록 482쪽): 목표마다 '유의점' — 시작행동/올바른 반응마다 + 표시, 또는 최상의 행동 묘사
+            { title: '아동의 사회 의사소통 목표', key: 'goalsSocial', cols: ['목표', '유의점: 활동 중 보인 최상의 행동', '+ 표시 (시작·올바른 반응마다)'], rows: 6 },
+            { title: '아동의 정서 조절 목표', key: 'goalsEmo', cols: ['목표', '유의점: 활동 중 보인 최상의 행동', '+ 표시 (시작·올바른 반응마다)'], rows: 4 },
+            { title: '파트너의 교류 지원 목표', key: 'partnerGoals', cols: ['목표', '유의점: 파트너가 제공한 지원', '+ 표시 (제공할 때마다)'], rows: 6 },
           ].map((s) => (
             <section key={s.key} className="report-section">
               <h3 className="report-h3">{s.title}</h3>
@@ -10947,20 +11218,16 @@ function ActivityLogI({ ws, setWs, showToast }) {
                           />
                         </td>
                         <td>
-                          <select
-                            className="rating-select"
-                            value={item.rating || ''}
-                            onChange={(e) => {
+                          {/* ★ 예전에 고른 −, +/−, + 값도 그대로 보이고 고칠 수 있다 */}
+                          <Editable
+                            value={item.rating}
+                            onChange={(v) => {
                               const arr = fillRows(log[s.key], i);
-                              arr[i] = { ...arr[i], rating: e.target.value };
+                              arr[i] = { ...arr[i], rating: v };
                               updateLog({ [s.key]: arr });
                             }}
-                          >
-                            <option value="">—</option>
-                            <option value="−">−</option>
-                            <option value="+/−">+/−</option>
-                            <option value="+">+</option>
-                          </select>
+                            placeholder="+ + +"
+                          />
                         </td>
                       </tr>
                     );
@@ -11017,7 +11284,7 @@ function ActivityLogII({ ws, setWs }) {
 
   return (
     <div id="printable-report" className="printable">
-      <ReportHeader title="SCERTS 주간 종합 기록" ws={ws} extras={[
+      <ReportHeader title="주간 메모 (센터 양식)" ws={ws} extras={[
         { label: '주차/기간', editable: true, value: data.weekOf, onChange: (v) => update({ weekOf: v }) },
       ]} />
 
@@ -11119,35 +11386,138 @@ function ActivityLogII({ ws, setWs }) {
   );
 }
 
-function WeeklyRecord({ ws, setWs }) {
-  const data = ws.activities.weekly || { weekOf: '', social: '', emo: '', ts: '', adjust: '' };
-  const update = (patch) => setWs((s) => ({
-    ...s, activities: { ...s.activities, weekly: { ...s.activities.weekly, ...patch } },
-  }));
+// =====================================================================
+// ★ SCERTS 주간 기록지 (1권 268쪽·부록 484쪽): 주간 목표 × 1~12주, 목표마다 0·1·2점
+//   목표 줄은 IEP에서 고른 주간 우선순위 목표(아동)와 파트너 교류 지원 목표를 그대로 쓴다
+// =====================================================================
+const WEEKS = 12;
+function weeklyGoalRows(ws) {
+  const stageData = STAGE_DATA[ws.meta?.stage] || {};
+  const childIds = new Set();
+  Object.entries(stageData).forEach(([k, d]) => {
+    if (k === 'interpersonalSupport' || k === 'learningSupport') return;
+    d.groups.forEach((g) => g.items.forEach((it) => childIds.add(it.id)));
+  });
+  // 이름: 선생님이 고쳐 쓴 목표(customGoal) → 책 문항 이름 → 저장된 이름
+  const lk = itemLookup(ws.meta?.stage);
+  const nameOf = (id, custom, stored) => (custom || '').trim() || lk[id]?.label || (stored || '').trim();
+  const child = (ws.iep?.selectedGoals || [])
+    .filter((g) => g && g.id)
+    .map((g) => ({ key: g.id, id: g.id, label: nameOf(g.id, g.customGoal, g.label), group: (childIds.has(g.id) || !/^(IS|LS)\d/.test(g.id)) ? 'child' : 'partner' }));
+  const partner = (ws.iep?.partnerGoals || []).map((p) => {
+    if (p && typeof p === 'object' && p.id) return { key: p.id, id: p.id, label: nameOf(p.id, p.customGoal, p.label), group: 'partner' };
+    const t = typeof p === 'string' ? p.trim() : '';
+    if (!t) return null;
+    const m = t.match(/^\[([A-Z]{2}\d+\.\d+)\]\s*(.*)$/);
+    return m ? { key: m[1], id: m[1], label: m[2], group: 'partner' } : { key: 'p:' + t, id: '', label: t, group: 'partner' };
+  }).filter(Boolean);
+  const seen = new Set();
+  return [...child, ...partner].filter((r) => (seen.has(r.key) ? false : (seen.add(r.key), true)));
+}
+function weeklyData(ws) {
+  const w = ws.activities?.weeklyScores || {};
+  return { startDates: w.startDates || Array(WEEKS).fill(''), scores: w.scores || {} };
+}
+// 기록한 주만 순서대로 [{week, date, score}]
+function weeklyHistory(ws, key) {
+  const { startDates, scores } = weeklyData(ws);
+  return (scores[key] || []).map((v, i) => ({ week: i + 1, date: startDates[i] || '', score: v }))
+    .filter((x) => x.score === 0 || x.score === 1 || x.score === 2);
+}
+// ★ 책(2권 350쪽): 3주 연속 0점이면 프로그램 결정을 재고한다
+function zeroRun(hist) {
+  let run = 0, max = 0;
+  hist.forEach((h) => { run = h.score === 0 ? run + 1 : 0; max = Math.max(max, run); });
+  return { max, now: run };
+}
 
+function WeeklyScoreSheet({ ws, setWs }) {
+  const rows = weeklyGoalRows(ws);
+  const { startDates, scores } = weeklyData(ws);
+  const save = (patch) => setWs((s) => {
+    const cur = s.activities?.weeklyScores || {};
+    return { ...s, activities: { ...s.activities, weeklyScores: { startDates: cur.startDates || Array(WEEKS).fill(''), scores: cur.scores || {}, ...patch(cur) } } };
+  });
+  const setDate = (i, v) => save((cur) => { const d = [...(cur.startDates || Array(WEEKS).fill(''))]; d[i] = v; return { startDates: d }; });
+  const setScore = (key, i, v) => save((cur) => {
+    const all = { ...(cur.scores || {}) };
+    const arr = [...(all[key] || Array(WEEKS).fill(null))];
+    arr[i] = v === '' ? null : Number(v);
+    all[key] = arr;
+    return { scores: all };
+  });
+  const legend = scoringLegendFor(ws.meta?.stage);
+  const stuck = rows.filter((r) => zeroRun(weeklyHistory(ws, r.key)).now >= 3);
+  const groups = [
+    { id: 'child', title: '아동: 사회 의사소통 및 정서 조절 목표' },
+    { id: 'partner', title: '파트너: 교류 지원 목표' },
+  ];
   return (
     <div id="printable-report" className="printable">
-      <ReportHeader title="SCERTS 주간 기록지" ws={ws} extras={[
-        { label: '주차/기간', editable: true, value: data.weekOf, onChange: (v) => update({ weekOf: v }) },
-      ]} />
-
-      {[
-        { key: 'social', title: '주간 사회 의사소통 진전' },
-        { key: 'emo', title: '주간 정서 조절 진전' },
-        { key: 'ts', title: '주간 교류 지원 (파트너 지원 효과)' },
-        { key: 'adjust', title: '다음 주 조정 사항' },
-      ].map((s) => (
-        <section key={s.key} className="report-section">
-          <h3 className="report-h3">{s.title}</h3>
-          <Editable
-            value={data[s.key]}
-            onChange={(v) => update({ [s.key]: v })}
-            multiline
-            minLines={4}
-          />
-        </section>
-      ))}
-
+      <ReportHeader title="SCERTS 주간 기록지" ws={ws} />
+      {rows.length === 0 ? (
+        <div className="empty-hint" style={{ padding: 24, textAlign: 'center' }}>
+          IEP 탭에서 주간 우선순위 목표와 파트너 교류 지원 목표를 먼저 고르면, 그 목표가 여기 줄로 들어옵니다.
+        </div>
+      ) : (
+        <>
+          {stuck.length > 0 && (
+            <div className="hint no-print" style={{ color: '#b54a3a', marginBottom: 8 }}>
+              ⚠ 최근 3주 연속 0점인 목표: {stuck.map((r) => r.id || r.label).join(', ')} — 더 낮은 수준의 목표로 바꾸거나 활동·교류 지원을 수정할지 검토하세요(1권 269쪽, 2권 350쪽).
+            </div>
+          )}
+          <div style={{ overflowX: 'auto' }}>
+            <table className="report-table weekly-score-table">
+              <thead>
+                <tr>
+                  <th style={{ minWidth: 220, textAlign: 'left' }}>목표</th>
+                  {startDates.map((d, i) => (
+                    <th key={i} style={{ minWidth: 58 }}>
+                      {i + 1}주
+                      <input type="date" className="no-print" value={d || ''} onChange={(e) => setDate(i, e.target.value)}
+                        style={{ width: 56, fontSize: 10, display: 'block', margin: '2px auto 0' }} title={`${i + 1}주 시작일`} />
+                      <span className="print-only" style={{ fontSize: 10 }}>{d ? d.slice(5).replace('-', '/') : ''}</span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {groups.map((g) => {
+                  const list = rows.filter((r) => r.group === g.id);
+                  return (
+                    <React.Fragment key={g.id}>
+                      <tr><th colSpan={WEEKS + 1} style={{ textAlign: 'left', background: '#ede6d5' }}>{g.title}</th></tr>
+                      {list.length === 0 && (
+                        <tr><td colSpan={WEEKS + 1} className="hint">IEP에서 고른 목표가 없습니다.</td></tr>
+                      )}
+                      {list.map((r) => {
+                        const arr = scores[r.key] || [];
+                        const run = zeroRun(weeklyHistory(ws, r.key)).now >= 3;
+                        return (
+                          <tr key={r.key}>
+                            <td style={{ textAlign: 'left', color: run ? '#b54a3a' : undefined }}>{r.id ? `${r.id} ` : ''}{r.label}</td>
+                            {Array.from({ length: WEEKS }).map((_, i) => (
+                              <td key={i} style={{ textAlign: 'center', padding: 2 }}>
+                                <select className="rating-select" value={arr[i] === 0 || arr[i] === 1 || arr[i] === 2 ? String(arr[i]) : ''}
+                                  onChange={(e) => setScore(r.key, i, e.target.value)} aria-label={`${r.id || r.label} ${i + 1}주 점수`}>
+                                  <option value="">—</option><option value="0">0</option><option value="1">1</option><option value="2">2</option>
+                                </select>
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <p className="hint" style={{ marginTop: 8 }}>
+            점수 산출 기준: {legend.map((l) => `${l.score}, ${l.desc}`).join('; ')}
+          </p>
+        </>
+      )}
       <div className="no-print" style={{ marginTop: 16, textAlign: 'right' }}>
         <button className="btn-primary" onClick={printReport}>인쇄 / PDF</button>
       </div>
@@ -11155,135 +11525,119 @@ function WeeklyRecord({ ws, setWs }) {
   );
 }
 
+// ★ SCERTS 활동 계획서 (1권 267쪽·부록 485쪽, 2권 1장): 하루 활동을 열로 놓고
+//   활동마다 시간·사회적 복잡성·집단 크기·파트너를 적고, 주간 아동 목표/파트너 목표 줄에 다룰 목표를 표시, 맨 아래 교류 지원 샘플
+const PLAN_COLS = 6;
+const blankPlanCol = () => ({ name: '', time: '', complexity: '', group: '', partners: '', ts: '' });
 function ActivityPlan({ ws, setWs }) {
-  const data = ws.activities.plan || { fields: {}, steps: '', goalsSocial: [], goalsEmo: [], partnerGoals: [], challenges: '' };
-  const update = (patch) => setWs((s) => ({
-    ...s, activities: { ...s.activities, plan: { ...s.activities.plan, ...patch } },
-  }));
-  const updateField = (k, v) => update({ fields: { ...data.fields, [k]: v } });
-  const updateList = (key, idx, value) => {
-    const arr = [...(data[key] || [])];
-    arr[idx] = value;
-    update({ [key]: arr });
-  };
-
-  // IEP에서 선정된 목표를 사회의사소통/정서조절로 자동 분리
-  const importFromIEP = async () => {
-    const stageData = STAGE_DATA[ws.meta.stage];
-    if (!stageData) return;
-    const socialGoals = [];
-    const emoGoals = [];
-    (ws.iep?.selectedGoals || []).forEach((g) => {
-      let domainKey = null;
-      Object.entries(stageData).forEach(([k, d]) => {
-        d.groups.forEach((grp) => {
-          grp.items.forEach((it) => {
-            if (it.id === g.id) domainKey = k;
-          });
-        });
-      });
-      const goalText = `[${g.id}] ${g.customGoal || g.label}`;
-      if (domainKey === 'joinAttention' || domainKey === 'symbolUse') socialGoals.push(goalText);
-      else if (domainKey === 'mutualReg' || domainKey === 'selfReg') emoGoals.push(goalText);
-    });
-    // ★ 파트너 목표는 글자 또는 추천 칩(번호+내용) 두 형태가 섞여 있음 → 둘 다 글자로 바꿔서 가져오기
-    const partnerGoals = (ws.iep?.partnerGoals || []).map((p) => {
-      if (p && typeof p === 'object' && p.id) {
-        const t = (p.customGoal || p.label || '').trim();
-        return t ? `[${p.id}] ${t}` : '';
-      }
-      return typeof p === 'string' ? p.trim() : '';
-    }).filter(Boolean);
-
-    // 교수 전략도 함께 가져오기
-    const strategies = ws.iep?.strategies || {};
-    const strategyText = [
-      strategies.sc && `[사회의사소통] ${strategies.sc}`,
-      strategies.er && `[정서조절] ${strategies.er}`,
-      strategies.ts && `[교류지원] ${strategies.ts}`,
-    ].filter(Boolean).join('\n');
-
-    if (!await appConfirm(`IEP에서 다음 데이터를 자동 인용합니다:\n- 아동 목표 ${socialGoals.length + emoGoals.length}개\n- 파트너 목표 ${partnerGoals.length}개\n- 교수 전략 ${strategyText ? '있음' : '없음'}\n\n현재 활동 계획서의 목표 영역을 덮어씁니다. 진행하시겠습니까?`)) return;
-
-    update({
-      goalsSocial: socialGoals,
-      goalsEmo: emoGoals,
-      partnerGoals: partnerGoals,
-      fields: { ...data.fields },
-      // IEP 교수 전략을 단계/흐름 시작점에 자동 채움 (비어있을 때만)
-      steps: data.steps || (strategyText ? `[IEP 교수 전략]\n${strategyText}\n\n[활동 단계 및 흐름]\n시작: ...\n본 활동: ...\n마무리: ...` : data.steps),
-    });
-  };
-
+  const data = ws.activities.plan || {};
+  const book = data.book || {};
+  const cols = Array.from({ length: PLAN_COLS }, (_, i) => ({ ...blankPlanCol(), ...((book.cols || [])[i] || {}) }));
+  const checks = book.checks || {};
+  const rows = weeklyGoalRows(ws);
+  const saveBook = (fn) => setWs((s) => {
+    const p0 = s.activities?.plan || {};
+    const b0 = p0.book || {};
+    return { ...s, activities: { ...s.activities, plan: { ...p0, book: { team: b0.team || '', cols: b0.cols || [], checks: b0.checks || {}, ...fn(b0) } } } };
+  });
+  const setCol = (i, k, v) => saveBook((b0) => {
+    const arr = Array.from({ length: PLAN_COLS }, (_, j) => ({ ...blankPlanCol(), ...((b0.cols || [])[j] || {}) }));
+    arr[i] = { ...arr[i], [k]: v };
+    return { cols: arr };
+  });
+  const toggle = (key, i) => saveBook((b0) => {
+    const all = { ...(b0.checks || {}) };
+    const arr = [...(all[key] || Array(PLAN_COLS).fill(false))];
+    arr[i] = !arr[i];
+    all[key] = arr;
+    return { checks: all };
+  });
+  // 예전 모양(활동 1개 기록)으로 적어 둔 내용이 있으면 지우지 않고 아래에 보여 준다
+  const oldLines = [
+    ...Object.entries(data.fields || {}).filter(([, v]) => String(v ?? '').trim()).map(([k, v]) => `${(ACTIVITY_PLAN.sections[0].items.find((it) => it.id === k) || {}).label || k}: ${v}`),
+    String(data.steps ?? '').trim() && `활동 단계: ${data.steps}`,
+    ...(data.goalsSocial || []).filter((v) => typeof v === 'string' && v.trim()).map((v) => `아동 목표(사회 의사소통): ${v}`),
+    ...(data.goalsEmo || []).filter((v) => typeof v === 'string' && v.trim()).map((v) => `아동 목표(정서 조절): ${v}`),
+    ...(data.partnerGoals || []).filter((v) => typeof v === 'string' && v.trim()).map((v) => `파트너 목표: ${v}`),
+    String(data.challenges ?? '').trim() && `예상되는 어려움: ${data.challenges}`,
+  ].filter(Boolean);
+  const infoRows = [
+    { k: 'name', label: '활동' },
+    { k: 'time', label: '시간' },
+    { k: 'complexity', label: '사회적 복잡성 (비율)' },
+    { k: 'group', label: '집단 크기' },
+    { k: 'partners', label: '팀 구성원 및 파트너' },
+  ];
+  const groups = [
+    { id: 'child', title: '주간 아동 목표' },
+    { id: 'partner', title: '주간 파트너 목표' },
+  ];
   return (
     <div id="printable-report" className="printable">
-      <div className="no-print" style={{ marginBottom: 16, textAlign: 'right' }}>
-        <button className="btn-ghost" onClick={importFromIEP}>📥 IEP에서 목표·전략 가져오기</button>
-      </div>
       <ReportHeader title="SCERTS 활동 계획서" ws={ws} />
-
       <section className="report-section">
-        <h3 className="report-h3">활동 정보</h3>
         <table className="report-table">
           <tbody>
-            {ACTIVITY_PLAN.sections[0].items.map((it) => (
-              <tr key={it.id}>
-                <th style={{ width: '20%' }}>{it.label}</th>
-                <td>
-                  <Editable
-                    value={data.fields[it.id]}
-                    onChange={(v) => updateField(it.id, v)}
-                    multiline
-                  />
-                </td>
-              </tr>
-            ))}
+            <tr>
+              <th style={{ width: '22%', textAlign: 'left' }}>팀 구성원 및 파트너</th>
+              <td><Editable value={book.team} onChange={(v) => saveBook(() => ({ team: v }))} placeholder="예: 담임(T), 보조교사(A), 엄마(M), 언어치료사(S)" /></td>
+            </tr>
           </tbody>
         </table>
       </section>
-
       <section className="report-section">
-        <h3 className="report-h3">활동 단계 및 흐름</h3>
-        <Editable
-          value={data.steps}
-          onChange={(v) => update({ steps: v })}
-          placeholder="단계별 흐름을 순서대로 기재 (시작 → 본 활동 → 마무리)"
-          multiline
-          minLines={5}
-        />
+        <div style={{ overflowX: 'auto' }}>
+          <table className="report-table plan-grid">
+            <tbody>
+              {infoRows.map((r) => (
+                <tr key={r.k}>
+                  <th style={{ width: '22%', textAlign: 'left' }}>{r.label}</th>
+                  {cols.map((c, i) => (
+                    <td key={i}><Editable value={c[r.k]} onChange={(v) => setCol(i, r.k, v)} placeholder={r.k === 'name' ? `활동 ${i + 1}` : ''} /></td>
+                  ))}
+                </tr>
+              ))}
+              {groups.map((g) => {
+                const list = rows.filter((r) => r.group === g.id);
+                return (
+                  <React.Fragment key={g.id}>
+                    <tr><th colSpan={PLAN_COLS + 1} style={{ textAlign: 'left', background: '#ede6d5' }}>{g.title} <span className="hint no-print" style={{ fontWeight: 400 }}>(IEP에서 고른 목표가 자동으로 들어옵니다)</span></th></tr>
+                    {list.length === 0 && <tr><td colSpan={PLAN_COLS + 1} className="hint">IEP에서 고른 목표가 없습니다.</td></tr>}
+                    {list.map((r) => (
+                      <tr key={r.key}>
+                        <td style={{ textAlign: 'left' }}>{r.id ? `${r.id} ` : ''}{r.label}</td>
+                        {cols.map((_, i) => {
+                          const on = !!(checks[r.key] || [])[i];
+                          return (
+                            <td key={i} style={{ textAlign: 'center', cursor: 'pointer' }} onClick={() => toggle(r.key, i)}
+                              role="checkbox" aria-checked={on} aria-label={`${r.id || r.label} — 활동 ${i + 1}`}>
+                              {on ? '✓' : <span className="no-print" style={{ color: '#ccc' }}>·</span>}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                );
+              })}
+              <tr>
+                <th style={{ textAlign: 'left' }}>교류 지원 샘플</th>
+                {cols.map((c, i) => (
+                  <td key={i}><Editable value={c.ts} onChange={(v) => setCol(i, 'ts', v)} multiline placeholder="예: 그림 선택판" /></td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="hint no-print">각 활동에서 초점을 둘 목표 칸을 눌러 ✓ 표시합니다. 오전·오후 일정은 계획서를 따로 쓰는 것이 책의 방식입니다(1권 267쪽).</p>
       </section>
-
-      {[
-        { key: 'goalsSocial', title: '아동 목표 (사회 의사소통)', count: 4 },
-        { key: 'goalsEmo', title: '아동 목표 (정서 조절)', count: 3 },
-        { key: 'partnerGoals', title: '파트너 교류 지원 전략', count: 4 },
-      ].map((s) => (
-        <section key={s.key} className="report-section">
-          <h3 className="report-h3">{s.title}</h3>
-          <ol className="suggestion-list">
-            {Array.from({ length: s.count }).map((_, i) => (
-              <li key={i}>
-                <Editable
-                  value={(data[s.key] || [])[i]}
-                  onChange={(v) => updateList(s.key, i, v)}
-                  multiline
-                />
-              </li>
-            ))}
-          </ol>
+      {oldLines.length > 0 && (
+        <section className="report-section">
+          <h3 className="report-h3">예전 양식으로 적은 활동 계획</h3>
+          <p className="hint no-print" style={{ marginTop: 0 }}>양식을 책 모양으로 바꾸기 전에 적어 둔 내용입니다. 지워지지 않고 그대로 남아 있습니다.</p>
+          <ul>{oldLines.map((t, i) => <li key={i} style={{ whiteSpace: 'pre-wrap' }}>{t}</li>)}</ul>
         </section>
-      ))}
-
-      <section className="report-section">
-        <h3 className="report-h3">예상되는 어려움 및 대응 전략</h3>
-        <Editable
-          value={data.challenges}
-          onChange={(v) => update({ challenges: v })}
-          multiline
-          minLines={4}
-        />
-      </section>
-
+      )}
       <div className="no-print" style={{ marginTop: 16, textAlign: 'right' }}>
         <button className="btn-primary" onClick={printReport}>인쇄 / PDF</button>
       </div>
@@ -12537,207 +12891,85 @@ function DataIntegrityCheck({ ws }) {
   );
 }
 
+// ★ 진도 보기: 책 방식(주간 기록지 0·1·2점, 3주 연속 0점이면 재검토 — 1권 269쪽·2권 350쪽)으로 정리
 function ActivityStats({ ws }) {
   const logs = ws.activities?.logI || [];
-
-  const stats = useMemo(() => {
-    if (logs.length === 0) return null;
-
-    // 목표별 도달 평가 누적
-    const goalStats = {};  // {goalText: { '+': n, '+/-': n, '-': n, total }}
-    const partnerStats = {};
-
-    const accumulateGoal = (rows, store) => {
-      (rows || []).forEach((r) => {
-        if (!r || !r.goal) return;
-        const key = r.goal;
-        if (!store[key]) store[key] = { plus: 0, partial: 0, minus: 0, total: 0, observations: [] };
-        const rating = r.rating;
-        if (rating === '+') store[key].plus++;
-        else if (rating === '+/−' || rating === '+/-') store[key].partial++;
-        else if (rating === '−' || rating === '-') store[key].minus++;
-        if (rating) store[key].total++;
-        if (r.observed) store[key].observations.push(r.observed);
-      });
-    };
-
-    logs.forEach((log) => {
-      accumulateGoal(log.goalsSocial, goalStats);
-      accumulateGoal(log.goalsEmo, goalStats);
-      accumulateGoal(log.partnerGoals, partnerStats);
-    });
-
-    // 회기 빈도 (날짜 분석)
-    const datesByMonth = {};
-    logs.forEach((log) => {
-      if (!log.date) return;
-      const ym = log.date.slice(0, 7);
-      datesByMonth[ym] = (datesByMonth[ym] || 0) + 1;
-    });
-
-    // 도달률 계산 및 분류
-    const goalList = Object.entries(goalStats).map(([goal, s]) => {
-      const reachRate = s.total > 0 ? (s.plus + s.partial * 0.5) / s.total : 0;
-      let status;
-      if (s.total === 0) status = 'noData';
-      else if (reachRate >= 0.7) status = 'mastered';
-      else if (reachRate >= 0.4) status = 'progressing';
-      else if (s.total >= 3 && reachRate < 0.3) status = 'stalled';
-      else status = 'early';
-      return { goal, ...s, reachRate, status };
-    }).sort((a, b) => b.reachRate - a.reachRate);
-
-    const partnerList = Object.entries(partnerStats).map(([goal, s]) => {
-      const reachRate = s.total > 0 ? (s.plus + s.partial * 0.5) / s.total : 0;
-      return { goal, ...s, reachRate };
-    });
-
-    return {
-      totalSessions: logs.length,
-      goalCount: goalList.length,
-      goalList,
-      partnerList,
-      datesByMonth,
-      masteredCount: goalList.filter((g) => g.status === 'mastered').length,
-      stalledCount: goalList.filter((g) => g.status === 'stalled').length,
-    };
-  }, [logs]);
-
-  if (!stats || stats.totalSessions === 0) {
+  const rows = weeklyGoalRows(ws);
+  const list = rows.map((r) => {
+    const hist = weeklyHistory(ws, r.key);
+    const last = hist.length ? hist[hist.length - 1].score : null;
+    const zr = zeroRun(hist);
+    const logCount = logs.filter((l) => ['goalsSocial', 'goalsEmo', 'partnerGoals'].some((k) => (l[k] || []).some((g) =>
+      g && (g.observed || g.rating) && (r.id ? (g.goal || '').includes(r.id) : (g.goal || '').trim() === r.label)))).length;
+    const status = hist.length === 0 ? 'noData' : zr.now >= 3 ? 'stalled' : last === 2 ? 'mastered' : 'progressing';
+    return { ...r, hist, last, logCount, status };
+  });
+  const datesByMonth = {};
+  logs.forEach((l) => { if (l.date) { const ym = l.date.slice(0, 7); datesByMonth[ym] = (datesByMonth[ym] || 0) + 1; } });
+  const stalled = list.filter((g) => g.status === 'stalled');
+  const statusText = { mastered: '최근 2점', progressing: '진행 중', stalled: '3주 연속 0점', noData: '— 기록 없음' };
+  const section = (group, title) => {
+    const items = list.filter((g) => g.group === group);
+    if (items.length === 0) return null;
     return (
-      <div className="empty-hint" style={{ padding: 30, textAlign: 'center' }}>
-        아직 기록된 회기가 없습니다.<br />
-        '회기별 활동 일지' 탭에서 회기를 추가하면 통계가 자동으로 생성됩니다.
-      </div>
-    );
-  }
-
-  return (
-    <div className="activity-stats">
-      {/* 요약 카드 */}
-      <div className="stats-summary-grid">
-        <div className="stats-summary-card">
-          <div className="stats-num">{stats.totalSessions}</div>
-          <div className="stats-label">기록된 회기</div>
-        </div>
-        <div className="stats-summary-card">
-          <div className="stats-num">{stats.goalCount}</div>
-          <div className="stats-label">추적 중인 목표</div>
-        </div>
-        <div className="stats-summary-card mastered">
-          <div className="stats-num">{stats.masteredCount}</div>
-          <div className="stats-label">숙달 단계 목표</div>
-        </div>
-        <div className="stats-summary-card stalled">
-          <div className="stats-num">{stats.stalledCount}</div>
-          <div className="stats-label">정체된 목표</div>
-        </div>
-      </div>
-
-      {/* 정체된 목표 알림 */}
-      {stats.stalledCount > 0 && (
-        <div className="info-box" style={{ borderColor: '#b54a3a', background: '#fef0e0' }}>
-          <strong>⚠ 정체된 목표 {stats.stalledCount}개 발견</strong><br />
-          최소 3회기 이상 기록되었으나 도달률이 30% 미만인 목표입니다.
-          전략·환경 변경을 고려해 보세요.
-        </div>
-      )}
-
-      {/* 아동 목표별 통계 */}
-      <section className="report-section">
-        <h3 className="report-h3">아동 목표별 도달 통계</h3>
+      <section className="report-section" key={group}>
+        <h3 className="report-h3">{title}</h3>
         <table className="report-table stats-table">
           <thead>
             <tr>
-              <th style={{ width: '40%' }}>목표</th>
-              <th style={{ textAlign: 'center' }}>+</th>
-              <th style={{ textAlign: 'center' }}>+/−</th>
-              <th style={{ textAlign: 'center' }}>−</th>
-              <th style={{ textAlign: 'center' }}>도달률</th>
+              <th style={{ width: '42%' }}>목표</th>
+              <th style={{ textAlign: 'center' }}>활동 일지 기록</th>
+              <th style={{ textAlign: 'center' }}>주간 점수 흐름</th>
               <th style={{ textAlign: 'center' }}>상태</th>
             </tr>
           </thead>
           <tbody>
-            {stats.goalList.length === 0 && (
-              <tr><td colSpan={6} style={{ textAlign: 'center', padding: 20, color: '#6b6452' }}>아직 평가가 기록된 목표가 없습니다.</td></tr>
-            )}
-            {stats.goalList.map((g, i) => (
-              <tr key={i} className={`stats-row stats-row-${g.status}`}>
-                <td>{g.goal}</td>
-                <td style={{ textAlign: 'center' }}>
-                  {g.plus > 0 && <span className="rating-cell plus">{g.plus}</span>}
-                </td>
-                <td style={{ textAlign: 'center' }}>
-                  {g.partial > 0 && <span className="rating-cell partial">{g.partial}</span>}
-                </td>
-                <td style={{ textAlign: 'center' }}>
-                  {g.minus > 0 && <span className="rating-cell minus">{g.minus}</span>}
-                </td>
-                <td style={{ textAlign: 'center', fontFamily: "'Gowun Batang', serif", fontWeight: 700 }}>
-                  {g.total > 0 ? `${Math.round(g.reachRate * 100)}%` : '—'}
-                </td>
-                <td style={{ textAlign: 'center' }}>
-                  <span className={`status-badge status-${g.status}`}>
-                    {g.status === 'mastered' && '🟢 숙달'}
-                    {g.status === 'progressing' && '🟡 진전 중'}
-                    {g.status === 'stalled' && '🔴 정체'}
-                    {g.status === 'early' && '⚪ 초기'}
-                    {g.status === 'noData' && '— 미평가'}
-                  </span>
-                </td>
+            {items.map((g) => (
+              <tr key={g.key} className={`stats-row stats-row-${g.status}`}>
+                <td>{g.id ? `${g.id} ` : ''}{g.label}</td>
+                <td style={{ textAlign: 'center' }}>{g.logCount}회</td>
+                <td style={{ textAlign: 'center' }}>{g.hist.length ? g.hist.map((h) => h.score).join(' → ') : '—'}</td>
+                <td style={{ textAlign: 'center' }}><span className={`status-badge status-${g.status}`}>{statusText[g.status]}</span></td>
               </tr>
             ))}
           </tbody>
         </table>
       </section>
-
-      {/* 파트너 목표별 통계 */}
-      {stats.partnerList.length > 0 && (
-        <section className="report-section">
-          <h3 className="report-h3">파트너 교류 지원 전략 효과</h3>
-          <table className="report-table stats-table">
-            <thead>
-              <tr>
-                <th style={{ width: '60%' }}>전략</th>
-                <th style={{ textAlign: 'center' }}>회기 적용</th>
-                <th style={{ textAlign: 'center' }}>효과</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stats.partnerList.map((p, i) => (
-                <tr key={i}>
-                  <td>{p.goal}</td>
-                  <td style={{ textAlign: 'center' }}>{p.total}회</td>
-                  <td style={{ textAlign: 'center', fontFamily: "'Gowun Batang', serif", fontWeight: 700 }}>
-                    {p.total > 0 ? `${Math.round(p.reachRate * 100)}%` : '—'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+    );
+  };
+  if (rows.length === 0 && logs.length === 0) {
+    return (
+      <div className="empty-hint" style={{ padding: 30, textAlign: 'center' }}>
+        아직 기록이 없습니다.<br />IEP에서 주간 목표를 고르고, 활동 일지와 주간 기록지를 쓰면 여기에 진도가 정리됩니다.
+      </div>
+    );
+  }
+  return (
+    <div className="activity-stats">
+      <div className="stats-summary-grid">
+        <div className="stats-summary-card"><div className="stats-num">{logs.length}</div><div className="stats-label">기록된 회기</div></div>
+        <div className="stats-summary-card"><div className="stats-num">{list.filter((g) => g.hist.length).length}</div><div className="stats-label">주간 점수가 있는 목표</div></div>
+        <div className="stats-summary-card mastered"><div className="stats-num">{list.filter((g) => g.status === 'mastered').length}</div><div className="stats-label">최근 주 2점 목표</div></div>
+        <div className="stats-summary-card stalled"><div className="stats-num">{stalled.length}</div><div className="stats-label">3주 연속 0점 목표</div></div>
+      </div>
+      {stalled.length > 0 && (
+        <div className="info-box" style={{ borderColor: '#b54a3a', background: '#fef0e0' }}>
+          <strong>⚠ 3주 연속 0점인 목표 {stalled.length}개</strong><br />
+          책은 이런 목표를 더 낮은 수준의 목표로 바꾸거나 활동·교류 지원을 수정하라고 안내합니다(1권 269쪽).
+        </div>
       )}
-
-      {/* 월별 회기 분포 */}
+      {section('child', '아동 목표 (주간 기록지)')}
+      {section('partner', '파트너 교류 지원 목표 (주간 기록지)')}
       <section className="report-section">
         <h3 className="report-h3">월별 회기 분포</h3>
         <div className="month-distribution">
-          {Object.entries(stats.datesByMonth)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([month, count]) => (
-              <div key={month} className="month-bar">
-                <div className="month-label">{month}</div>
-                <div className="month-bar-bar">
-                  <div className="month-bar-fill" style={{ width: `${Math.min(100, count * 12)}%` }}>
-                    {count}회
-                  </div>
-                </div>
-              </div>
-            ))
-          }
-          {Object.keys(stats.datesByMonth).length === 0 && (
-            <div className="empty-hint" style={{ padding: 16 }}>날짜가 기록된 회기가 없습니다.</div>
-          )}
+          {Object.entries(datesByMonth).sort(([x], [y]) => x.localeCompare(y)).map(([month, count]) => (
+            <div key={month} className="month-bar">
+              <div className="month-label">{month}</div>
+              <div className="month-bar-bar"><div className="month-bar-fill" style={{ width: `${Math.min(100, count * 12)}%` }}>{count}회</div></div>
+            </div>
+          ))}
+          {Object.keys(datesByMonth).length === 0 && <div className="empty-hint" style={{ padding: 16 }}>날짜가 기록된 회기가 없습니다.</div>}
         </div>
       </section>
     </div>
