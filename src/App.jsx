@@ -843,7 +843,7 @@ function sesOf(session, stage) {
 const SOCIAL_PARTNER = {
   // 사회 의사소통 - 공동관심 (JA) /54
   joinAttention: {
-    label: '공동관심 (Joint Attention)',
+    label: '공동관심',
     code: 'JA',
     maxScore: 54,
     groups: [
@@ -914,7 +914,7 @@ const SOCIAL_PARTNER = {
 
   // 상징 사용 (SU) /62
   symbolUse: {
-    label: '상징 사용 (Symbol Use)',
+    label: '상징 사용',
     code: 'SU',
     maxScore: 62,
     groups: [
@@ -984,7 +984,7 @@ const SOCIAL_PARTNER = {
 
   // 정서 조절 - 상호조절 (MR) /38
   mutualReg: {
-    label: '상호조절 (Mutual Regulation)',
+    label: '상호조절',
     code: 'MR',
     maxScore: 38,
     groups: [
@@ -1032,7 +1032,7 @@ const SOCIAL_PARTNER = {
 
   // 자기조절 (SR) /40
   selfReg: {
-    label: '자기조절 (Self-Regulation)',
+    label: '자기조절',
     code: 'SR',
     maxScore: 40,
     groups: [
@@ -1081,7 +1081,7 @@ const SOCIAL_PARTNER = {
 
   // 교류 지원 - 대인관계 지원 (IS) /66
   interpersonalSupport: {
-    label: '대인관계 지원 (Interpersonal Support)',
+    label: '대인관계 지원',
     code: 'IS',
     maxScore: 66,
     groups: [
@@ -1158,7 +1158,7 @@ const SOCIAL_PARTNER = {
 
   // 학습 지원 (LS) /50
   learningSupport: {
-    label: '학습 지원 (Learning Support)',
+    label: '학습 지원',
     code: 'LS',
     maxScore: 50,
     groups: [
@@ -1216,7 +1216,7 @@ const SOCIAL_PARTNER = {
 // =====================================================================
 const LANGUAGE_PARTNER = {
   joinAttention: {
-    label: '공동관심 (Joint Attention)',
+    label: '공동관심',
     code: 'JA',
     maxScore: 62,
     groups: [
@@ -1295,7 +1295,7 @@ const LANGUAGE_PARTNER = {
   },
 
   symbolUse: {
-    label: '상징 사용 (Symbol Use)',
+    label: '상징 사용',
     code: 'SU',
     maxScore: 50,
     groups: [
@@ -1358,7 +1358,7 @@ const LANGUAGE_PARTNER = {
   },
 
   mutualReg: {
-    label: '상호조절 (Mutual Regulation)',
+    label: '상호조절',
     code: 'MR',
     maxScore: 46,
     groups: [
@@ -1409,7 +1409,7 @@ const LANGUAGE_PARTNER = {
   },
 
   selfReg: {
-    label: '자기조절 (Self-Regulation)',
+    label: '자기조절',
     code: 'SR',
     maxScore: 56,
     groups: [
@@ -1470,7 +1470,7 @@ const LANGUAGE_PARTNER = {
   },
 
   interpersonalSupport: {
-    label: '대인관계 지원 (Interpersonal Support)',
+    label: '대인관계 지원',
     code: 'IS',
     maxScore: 66,
     groups: [
@@ -1546,7 +1546,7 @@ const LANGUAGE_PARTNER = {
   },
 
   learningSupport: {
-    label: '학습 지원 (Learning Support)',
+    label: '학습 지원',
     code: 'LS',
     maxScore: 50,
     groups: [
@@ -1604,7 +1604,7 @@ const LANGUAGE_PARTNER = {
 // =====================================================================
 const CONVERSATION_PARTNER = {
   joinAttention: {
-    label: '공동관심 (Joint Attention)',
+    label: '공동관심',
     code: 'JA',
     maxScore: 58,
     groups: [
@@ -1666,7 +1666,7 @@ const CONVERSATION_PARTNER = {
   },
 
   symbolUse: {
-    label: '상징 사용 (Symbol Use)',
+    label: '상징 사용',
     code: 'SU',
     maxScore: 58,
     groups: [
@@ -1733,7 +1733,7 @@ const CONVERSATION_PARTNER = {
   },
 
   mutualReg: {
-    label: '상호조절 (Mutual Regulation)',
+    label: '상호조절',
     code: 'MR',
     maxScore: 56,
     groups: [
@@ -1794,7 +1794,7 @@ const CONVERSATION_PARTNER = {
   },
 
   selfReg: {
-    label: '자기조절 (Self-Regulation)',
+    label: '자기조절',
     code: 'SR',
     maxScore: 64,
     groups: [
@@ -1864,7 +1864,7 @@ const CONVERSATION_PARTNER = {
   },
 
   interpersonalSupport: {
-    label: '대인관계 지원 (Interpersonal Support)',
+    label: '대인관계 지원',
     code: 'IS',
     maxScore: 66,
     groups: [
@@ -1940,7 +1940,7 @@ const CONVERSATION_PARTNER = {
   },
 
   learningSupport: {
-    label: '학습 지원 (Learning Support)',
+    label: '학습 지원',
     code: 'LS',
     maxScore: 50,
     groups: [
@@ -2003,15 +2003,15 @@ const STAGE_DATA = {
 // 6대 영역 카테고리 표시용
 const DOMAIN_GROUPS = [
   {
-    title: '사회 의사소통 (Social Communication)',
+    title: '사회 의사소통',
     domains: ['joinAttention', 'symbolUse'],
   },
   {
-    title: '정서 조절 (Emotional Regulation)',
+    title: '정서 조절',
     domains: ['mutualReg', 'selfReg'],
   },
   {
-    title: '교류 지원 (Transactional Support)',
+    title: '교류 지원',
     domains: ['interpersonalSupport', 'learningSupport'],
   },
 ];
@@ -6946,9 +6946,9 @@ function HelpGuide({ onClose, compact }) {
         <div className="help-block">
           <div className="help-block-title">세 가지 핵심 영역</div>
           <ul className="help-ul">
-            <li><b>SC (Social Communication / 사회 의사소통)</b> — 공동 관심, 상징 사용</li>
-            <li><b>ER (Emotional Regulation / 정서 조절)</b> — 상호 조절, 자기 조절</li>
-            <li><b>TS (Transactional Support / 교류 지원)</b> — 대인관계 지원, 학습 지원</li>
+            <li><b>사회 의사소통</b> — 공동관심, 상징 사용</li>
+            <li><b>정서 조절</b> — 상호조절, 자기조절</li>
+            <li><b>교류 지원</b> — 대인관계 지원, 학습 지원</li>
           </ul>
         </div>
         <div className="help-block">
