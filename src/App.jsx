@@ -9077,6 +9077,9 @@ function IEPTab({ ws, setWs, onArchive, showToast }) {
     };
     const profileSentence = (k) => {
       const pr = longGoalProfile(k);
+      // ★ 채점한 교수목표가 하나도 없으면 '0점'이 아니라 '아직 채점하지 않음'
+      const anyScored = (stageData[k]?.groups || []).some((g) => g.items.some((it) => typeof sc0[it.id] === 'number'));
+      if (!anyScored) return `${pr.label}${hasJongseong(pr.label) ? '은' : '는'} 아직 채점하지 않았다.`;
       const parts = [];
       if (pr.strong.length) parts.push(`상대적 강점은 ${pr.strong.join('·')}`);
       if (pr.need.length) parts.push(`상대적 요구는 ${pr.need.join('·')}`);
@@ -9459,14 +9462,17 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     if (!ws.pre || !ws.post) return null;
     const result = [];
     Object.entries(stageData).forEach(([key, domain]) => {
-      let pre = 0, post = 0;
+      let pre = 0, post = 0, mismatch = false;
       domain.groups.forEach((g) =>
         g.items.forEach((it) => {
-          if (typeof ws.pre.scores[it.id] === 'number') pre += ws.pre.scores[it.id];
-          if (typeof ws.post.scores[it.id] === 'number') post += ws.post.scores[it.id];
+          const a = typeof ws.pre.scores[it.id] === 'number', b = typeof ws.post.scores[it.id] === 'number';
+          if (a) pre += ws.pre.scores[it.id];
+          if (b) post += ws.post.scores[it.id];
+          if (a !== b) mismatch = true;   // ★ 한쪽에서만 채점한 교수목표가 있음
         }),
       );
       result.push({
+        mismatch,
         domain: key,
         label: domain.label.replace(/\s*\(.*\)/, ''),
         pre,
@@ -9487,7 +9493,17 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
   const gTitle = (g) => `「${g.title.replace(/^\d+\.\s*/, '').replace(/^파트너는\s*/, '').replace(/[.。]\s*$/, '')}」`;
 
   // 진단·활동기록·MR-SR 분석을 통합한 자동 채움
-  const autoFillInterim = () => {
+  const autoFillInterim = async () => {
+    // ★ 중간 점검 글이 남은 채로 종결(또는 반대)로 자동 채움을 누르면, 그 보고서 유형 문장으로 새로 채울지 먼저 묻는다
+    const filledAs = ws.interim.autoFilledAs
+      || (/다음 기간에도 계속 다루는|새로운 목표로 바꾼다|다음 기간에는/.test(ws.interim.direction || '') ? 'interim'
+        : /이후 환경에서/.test(ws.interim.direction || '') ? 'closing' : '');
+    const nowAs = isClosing ? 'closing' : 'interim';
+    let redo = false;
+    if (filledAs && filledAs !== nowAs) {
+      const from = filledAs === 'closing' ? '종결' : '중간 점검';
+      redo = await appConfirm(`${from} 보고서 자동 채움 글이 남아 있습니다.\n\n확인: 요약·영역별 진전·관찰·향후 방향을 ${isClosing ? '종결' : '중간 점검'} 문장으로 새로 채움 (그 칸에 직접 고친 내용도 바뀜)\n취소: 빈 칸만 채움`);
+    }
     const profile = STAGE_PROFILE[ws.meta.stage];
     const cName = ws.meta.childName || '';
 
@@ -9505,13 +9521,16 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
         summary += `구성 요소별 진단 점수는 사전에서 사후로 ${childDomains.map(fmt).join(', ')}으로 나타났다. `;
       }
       // 가장 진전이 큰 아동 구성 요소 한 가지 강조 (교류 지원은 파트너 점수라 제외)
-      const topGains = [...childDomains].filter((d) => d.delta > 0).sort((a, b) => b.delta - a.delta);
+      const topGains = [...childDomains].filter((d) => d.delta > 0 && !d.mismatch).sort((a, b) => b.delta - a.delta);
       if (topGains.length > 0) {
         summary += `특히 ${topGains[0].label}에서 ${topGains[0].delta}점의 가장 큰 향상이 관찰되었다. `;
       }
       if (partnerDomains.length > 0) {
         summary += `파트너의 교류 지원은 ${partnerDomains.map(fmt).join(', ')}으로 나타났다. `;
       }
+      // ★ 사전·사후에 채점한 교수목표가 다른 구성 요소는 총점을 그대로 비교할 수 없음을 한 번에 밝힌다
+      const mm = compareData.filter((d) => d.mismatch).map((d) => d.label);
+      if (mm.length) summary += `다만 ${mm.join('·')}${hasJongseong(mm[mm.length - 1]) ? '은' : '는'} 사전·사후에 채점한 교수목표가 달라 점수를 그대로 비교하기 어렵다. `;
       // ★ 분기 재진단(1권 269쪽): 사전에 상대적 요구였다가 사후에 상대적 강점이 된 장기목표
       const turned = [];
       Object.entries(stageData).forEach(([k, d]) => {
@@ -9548,13 +9567,14 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
               const pre = preScores[it.id];
               const post = postScores2[it.id];
               if (typeof pre === 'number' && typeof post === 'number' && post > pre) {
-                improvedItems.push(`[${it.id}] ${it.label}`);
+                improvedItems.push(`${it.id} 「${it.label}」`);
               }
             }),
           );
         }
         // ★ 책 관찰 기록지 프로파일 요약처럼 만점을 함께 적는다(백분율은 쓰지 않음). 점수 변화 + 장기목표 강점/요구 변화 + 점수가 오른 교수목표
         let progress = `사전 ${d.pre}/${d.max}점에서 사후 ${d.post}/${d.max}점으로 ${d.delta > 0 ? `${d.delta}점 높아졌다` : d.delta < 0 ? `${Math.abs(d.delta)}점 낮아졌다` : '변화가 없었다'}.`;
+        if (d.mismatch) progress += ' 사전·사후에 채점한 교수목표가 달라 점수를 그대로 비교하기 어렵다.';
         const toStrong = [], toNeed = [];
         (stageData[d.domain]?.groups || []).forEach((g) => {
           const a = groupStrength(preScores, g), b = groupStrength(postScores2, g);
@@ -9564,7 +9584,7 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
         if (toStrong.length) progress += ` 상대적 요구에서 상대적 강점이 된 장기목표: ${toStrong.join('·')}.`;
         if (toNeed.length) progress += ` 상대적 강점에서 상대적 요구가 된 장기목표: ${toNeed.join('·')}.`;
         if (improvedItems.length > 0) {
-          progress += ` 점수가 오른 교수목표: ${improvedItems.slice(0, 3).join(', ')}${improvedItems.length > 3 ? ` 외 ${improvedItems.length - 3}개` : ''}.`;
+          progress += ` 점수가 오른 교수목표: ${improvedItems.slice(0, 3).join('·')}${improvedItems.length > 3 ? ` 외 ${improvedItems.length - 3}개` : ''}.`;
         }
         domainSummary[d.domain] = { behavior: '', progress };
       });
@@ -9593,7 +9613,7 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
         if (isBookLog(log)) {
           // ★ 책 활동 일지: 목표마다 '활동'과 '유의점'
           observations += `▸ ${log.date || `회기 ${i + 1}`}\n`;
-          const lines = [...(log.bookChild || []), ...(log.bookPartner || [])].flatMap((r) => (r.note || []).map((n, j) => ({ r, n, a: (r.act || [])[j] })))
+          const lines = [...(log.bookChild || []), ...(log.bookPartner || [])].filter(Boolean).flatMap((r) => (r.note || []).map((n, j) => ({ r, n, a: (r.act || [])[j] })))
             .filter((x) => x.n && x.n.trim()).slice(0, 3)
             .map((x) => `  · ${x.r.goal ? `${x.r.goal} — ` : ''}${x.a && x.a.trim() ? `활동: ${x.a.trim()} / ` : ''}유의점: ${x.n.trim()}`);
           if (lines.length) observations += lines.join('\n') + '\n';
@@ -9611,14 +9631,14 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
         if (log.notes) observations += `  메모: ${log.notes.slice(0, 100)}\n`;
         observations += '\n';
       });
-    } else if (!observations) {
-      observations = '활동 일지와 주간 기록지를 쓰면 진도와 관찰 사례가 자동으로 인용됩니다.';
     }
+    // ★ 기록이 없으면 칸을 비워 둔다(안내 문장은 화면 위 안내줄에만 — 보고서 본문·인쇄에 들어가지 않게)
 
     // 4) 향후 중재 방향 — 책의 분기 점검(1권 269쪽, 2권 350쪽):
     //   2점에 도달한 목표는 새 목표로, 0·1점 목표는 계속하거나 수정, 3주 연속 0점이면 더 낮은 수준의 목표나 지원 수정,
     //   다음 목표는 사후 프로파일에서 기능성·가족의 우선순위·발달적 적합성으로 고른다
     const postScores = ws.post?.scores || ws.assessment.scores;
+    const PW = ws.post ? '사후' : '현재';   // ★ 사후로 지정한 세션이 없으면 지금 열린 진단 점수이므로 '현재'
     const plan = buildGoalPlan(ws.meta.stage, postScores, ws.familyPriorities, null);
     const nextWord = isClosing ? '이후 환경에서는' : '다음 기간에는';
     const lk = itemLookup(ws.meta.stage);
@@ -9632,13 +9652,13 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
       const nm = grp === 'child' ? 'IEP 주간 목표' : '파트너 교류 지원 목표';
       const reached = rowsG.filter((g) => g.score === 2);
       const ongoing = rowsG.filter((g) => g.score !== 2);
-      if (reached.length) parts.push(`${nm} 중 사후 진단에서 일관성 있게 도달(2점)한 목표이다. ${isClosing ? '이후 환경에서 유지되는지 확인한다.' : '새로운 목표로 바꾼다.'}\n${numbered(reached)}`);
-      if (ongoing.length) parts.push(`${nm} 중 ${isClosing ? '이후 환경에서도 계속 지원이 필요한' : '다음 기간에도 계속 다루는'} 목표이다.\n${numbered(ongoing, (g) => `${ref(g)}${typeof g.score === 'number' ? ` (사후 ${g.score}점)` : ' (사후 미채점)'}`)}`);
+      if (reached.length) parts.push(`${nm} 중 ${PW} 진단에서 일관성 있게 도달(2점)한 목표이다. ${isClosing ? '이후 환경에서 유지되는지 확인한다.' : '새로운 목표로 바꾼다.'}\n${numbered(reached)}`);
+      if (ongoing.length) parts.push(`${nm} 중 ${isClosing ? '이후 환경에서도 계속 지원이 필요한' : '다음 기간에도 계속 다루는'} 목표이다.\n${numbered(ongoing, (g) => `${ref(g)}${typeof g.score === 'number' ? ` (${PW} ${g.score}점)` : ` (${PW} 미채점)`}`)}`);
     });
     const stuckRows = iepRows.filter((r) => zeroRun(r.hist).now >= 3);
     if (stuckRows.length) parts.push(`주간 기록지에서 3주 연속 0점인 목표는 더 낮은 수준의 목표로 바꾸거나 활동·교류 지원을 수정한다.\n${numbered(stuckRows)}`);
     const nextChild = [...plan.sc, ...plan.er].filter((g) => !iepRows.some((r) => r.id === g.id));
-    if (nextChild.length) parts.push(`${nextWord} 사후 진단에서 아직 일관되지 않은 다음 교수목표를 후보로 검토한다(사회 의사소통·정서 조절).\n${numbered(nextChild, (g) => `${goalRef(g)} (사후 ${g.score}점)`)}`);
+    if (nextChild.length) parts.push(`${nextWord} ${PW} 진단에서 아직 일관되지 않은 다음 교수목표를 후보로 검토한다(사회 의사소통·정서 조절).\n${numbered(nextChild, (g) => `${goalRef(g)} (${PW} ${g.score}점)`)}`);
     const nextTs = plan.ts.filter((g) => !iepRows.some((r) => r.id === g.id));
     if (nextTs.length) parts.push(`이 목표를 돕기 위해 파트너가 보완할 교류 지원 후보이다.\n${numbered(nextTs, goalRef)}`);
     const hope3 = (ws.familyPriorities?.threeMonthHope || '').trim();
@@ -9646,14 +9666,14 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
     let direction = parts.join('\n\n');
 
     // 빈 필드만 자동 채움 (사용자 입력 보존)
-    const isEmpty = (v) => !v || (typeof v === 'string' && v.trim() === '');
+    const isEmpty = (v) => redo || !v || (typeof v === 'string' && v.trim() === '');
     let filledCount = 0;
     let preservedCount = 0;
     if (isEmpty(ws.interim.summary)) { updateInterim('summary', summary); filledCount++; } else preservedCount++;
-    if (Object.keys(ws.interim.domainSummary || {}).length === 0) { updateInterim('domainSummary', domainSummary); filledCount++; } else preservedCount++;
+    if (redo || Object.keys(ws.interim.domainSummary || {}).length === 0) { updateInterim('domainSummary', domainSummary); filledCount++; } else preservedCount++;
     observations = observations.trim();
     if (isEmpty(ws.interim.observations)) { updateInterim('observations', observations); filledCount++; } else preservedCount++;
-    if (isEmpty(ws.interim.direction)) { updateInterim('direction', direction); filledCount++; } else preservedCount++;
+    if (isEmpty(ws.interim.direction)) { updateInterim('direction', direction); filledCount++; updateInterim('autoFilledAs', nowAs); } else preservedCount++;   // ★ 향후 방향을 실제로 새로 채웠을 때만 '어느 보고서 문장인지' 기록
 
     // [종결 모드] 목표 달성도(IEP 끌어오기) + 향후 권고 자동 채움
     if (isClosing) {
@@ -9664,7 +9684,7 @@ function InterimTab({ ws, setWs, onArchive, showToast }) {
         const goals = iepRows.map((g) => {
           const sc = typeof g.score === 'number' ? g.score : null;
           const notes = [];
-          if (sc !== null) notes.push(`사후 ${sc}점(${scoreWord[sc]})`);
+          if (sc !== null) notes.push(`${PW} ${sc}점(${scoreWord[sc]})`);
           if (g.hist.length) notes.push(`주간 기록지: ${g.hist.map((h) => h.score).join(' → ')}`);
           return { goal: `${g.group === 'partner' ? '[파트너] ' : ''}${ref(g)}`, status: sc !== null ? stLabel[sc] : '', note: notes.join(' / ') };
         });
@@ -11554,7 +11574,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
       const cur = arr[activeIdx];
       if (isBookLog(cur)) {
         // 목표 이름만 바꾸고, 같은 줄에 적어 둔 활동·유의점은 그대로 둔다
-        const keep = (oldRows, newRows) => padBookRows(newRows.map((r, i) => ({ ...(oldRows?.[i] || bookRow()), goal: r.goal })).concat((oldRows || []).slice(newRows.length).filter((r) => r.act.some(Boolean) || r.note.some(Boolean))));
+        const keep = (oldRows, newRows) => padBookRows(newRows.map((r, i) => ({ ...(oldRows?.[i] || bookRow()), goal: r.goal })).concat((oldRows || []).slice(newRows.length).filter((r) => r && ((r.act || []).some(Boolean) || (r.note || []).some(Boolean)))));
         arr[activeIdx] = { ...cur, bookChild: keep(cur.bookChild, bookGoals.child), bookPartner: keep(cur.bookPartner, bookGoals.partner) };
       } else {
         arr[activeIdx] = {
@@ -11640,8 +11660,8 @@ function ActivityLogI({ ws, setWs, showToast }) {
       // ★ 책 일지: 목표 이름·활동은 저장, 유의점은 비움(재사용 시 새로 기록)
       ...(isBookLog(log) ? {
         kind: log.kind || 'I',
-        bookChild: log.bookChild.map((r) => ({ goal: r.goal || '', act: [...(r.act || ['', ''])], note: ['', ''] })),
-        bookPartner: (log.bookPartner || []).map((r) => ({ goal: r.goal || '', act: [...(r.act || ['', ''])], note: ['', ''] })),
+        bookChild: log.bookChild.filter(Boolean).map((r) => ({ goal: r.goal || '', act: [...(r.act || ['', ''])], note: ['', ''] })),
+        bookPartner: (log.bookPartner || []).filter(Boolean).map((r) => ({ goal: r.goal || '', act: [...(r.act || ['', ''])], note: ['', ''] })),
       } : {}),
       // 평가는 비워둠 (재사용 시 새로 평가)
       goalsSocial: (log.goalsSocial || []).map((g) => ({ goal: g?.goal || '', observed: '', rating: '' })),
@@ -11708,7 +11728,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
       const goals = [...(l.goalsSocial || []), ...(l.goalsEmo || []), ...(l.partnerGoals || [])]
         .filter(Boolean)  // ★ 비어 있는 줄이 있어도 멈추지 않게
         .map((g) => `${g.goal || ''} ${g.observed || ''}`).join(' ').toLowerCase()
-        + ' ' + [...(l.bookChild || []), ...(l.bookPartner || [])].map((r) => `${r.goal || ''} ${(r.act || []).join(' ')} ${(r.note || []).join(' ')}`).join(' ').toLowerCase();
+        + ' ' + [...(l.bookChild || []), ...(l.bookPartner || [])].filter(Boolean).map((r) => `${r.goal || ''} ${(r.act || []).join(' ')} ${(r.note || []).join(' ')}`).join(' ').toLowerCase();
       const notes = (l.notes || '').toLowerCase();
       const matched = (l.date || '').includes(q) || fields.includes(q) || goals.includes(q) || notes.includes(q);
       return matched ? i : -1;
@@ -11776,7 +11796,7 @@ function ActivityLogI({ ws, setWs, showToast }) {
                     <div className="template-menu-info">
                       <strong>{tpl.name}</strong>
                       <div className="template-menu-meta">
-                        목표 {tpl.bookChild ? tpl.bookChild.concat(tpl.bookPartner || []).filter((r) => r.goal).length : (tpl.goalsSocial?.length || 0) + (tpl.goalsEmo?.length || 0)}개 ·
+                        목표 {tpl.bookChild ? tpl.bookChild.concat(tpl.bookPartner || []).filter((r) => r && r.goal).length : (tpl.goalsSocial?.length || 0) + (tpl.goalsEmo?.length || 0)}개 ·
                         {tpl.fields?.activity ? ` ${tpl.fields.activity} ·` : ''}
                         {' '}{new Date(tpl.createdAt).toLocaleDateString('ko-KR')}
                       </div>
